@@ -28,7 +28,7 @@ my-service/
 │   └── my_service/
 │       ├── __init__.py
 │       ├── main.py          # entrypoint / app factory
-│       ├── config.py        # Pydantic BaseSettings
+│       ├── settings.py      # BaseSettings + module constants (Final / UPPER_SNAKE)
 │       ├── models/          # SQLAlchemy ORM models
 │       ├── schemas/         # Pydantic request/response schemas
 │       ├── routers/         # FastAPI routers or Strawberry resolvers
@@ -80,7 +80,7 @@ my-lib/
 ## Static typing (always) and type checking (ty)
 
 - **Always use typing**: annotate function signatures, public APIs, and non-obvious variables; prefer modern syntax (`list[str]`, `dict[str, Any]` with care, `X | Y` unions on supported Python versions).
-- Prefer **`from __future__ import annotations`** when it simplifies forward references and reduces quote noise (project-wide consistency).
+- Prefer `**from __future__ import annotations`** when it simplifies forward references and reduces quote noise (project-wide consistency).
 - **Import for typing under `TYPE_CHECKING`** when it avoids runtime import cycles or heavy optional dependencies:
 
 ```python
@@ -95,19 +95,41 @@ def use_session(session: Session) -> None:
     ...
 ```
 
-- Use **ty** (Astral's Rust-based type checker, shipped alongside ruff) for static type checking; run it in CI alongside ruff. If `ty` is unavailable or blocked, use **`mypy`** with `strict = true` as the fallback. Either way, type checking must run in CI and block merges on errors.
+- Use **ty** (Astral's Rust-based type checker, shipped alongside ruff) for static type checking; run it in CI alongside ruff. If `ty` is unavailable or blocked, use `**mypy`** with `strict = true` as the fallback. Either way, type checking must run in CI and block merges on errors.
 
 ---
 
 ## Settings and configuration
 
-- Use **`pydantic-settings`** (`BaseSettings`) for all runtime configuration.
+Use a single `**settings.py**` at the package root for:
+
+1. **Runtime settings** — env-backed values via `**pydantic-settings`** (`BaseSettings`).
+2. **Constants** — static, non-secret values that do not belong in the environment (defaults shared across modules, protocol limits, feature toggles fixed in code).
+
+### Runtime settings (`BaseSettings`)
+
 - Read values from **environment variables** or `.env` files; never hard-code secrets.
 - Validate and document every setting at the module boundary — fail fast on startup if required values are missing.
 
+### Constants (same module)
+
+- Define **module-level constants** with `**typing.Final`**, `**UPPER_SNAKE_CASE**`, and explicit types.
+- Prefer `**frozenset**` / tuples for immutable collections; avoid mutable defaults at import time.
+- Keep constants **small and stable**; if the module grows large, split into `settings.py` (only `BaseSettings`) and `constants.py`, re-export from `settings.py` only if you need a single import path.
+
 ```python
+from __future__ import annotations
+
+from typing import Final
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# --- constants (not from env) ---
+DEFAULT_PAGE_SIZE: Final[int] = 50
+MAX_PAGE_SIZE: Final[int] = 200
+HTTP_TIMEOUT_S: Final[float] = 30.0
+
+# --- env-backed settings ---
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
@@ -119,7 +141,7 @@ class Settings(BaseSettings):
 settings = Settings()
 ```
 
-- Expose a single `settings` singleton; inject it explicitly in tests rather than accessing it as a global.
+- Expose a single `**settings**` singleton for `BaseSettings`; inject it explicitly in tests rather than accessing it as a global. Import `**constants**` from the same module (`from my_service.settings import DEFAULT_PAGE_SIZE, settings`) or use the names directly.
 - Never commit `.env`; commit `.env.example` with placeholder values.
 
 ---
@@ -142,7 +164,7 @@ settings = Settings()
 
 ## Daemon / long-running processes
 
-- For **daemon-style services** (long-running workers, supervisors), use established patterns: proper signal handling (SIGTERM/SIGINT), structured logging, graceful shutdown, and optionally the **`python-daemon`** library or process managers (systemd, containers) as the project requires.
+- For **daemon-style services** (long-running workers, supervisors), use established patterns: proper signal handling (SIGTERM/SIGINT), structured logging, graceful shutdown, and optionally the `**python-daemon`** library or process managers (systemd, containers) as the project requires.
 - Do not daemonize casually in library code; keep entrypoints explicit.
 
 ---
@@ -150,7 +172,7 @@ settings = Settings()
 ## Data models and validation
 
 - Use **Pydantic** (v2) for **validated** settings, API payloads, and boundaries where runtime validation matters.
-- Use **`dataclasses`** for **simple immutable or internal** data carriers where validation is not required and typing is enough.
+- Use `**dataclasses`** for **simple immutable or internal** data carriers where validation is not required and typing is enough.
 - Choose one primary representation per boundary (avoid duplicating the same shape in three different ad-hoc dicts).
 
 ---
@@ -183,8 +205,8 @@ class UnauthorizedError(AppError):
 
 ## Library packages
 
-- Explicitly define **`__all__`** in `__init__.py` to document the public surface.
-- Add an empty **`py.typed`** file to enable type checking for downstream consumers (PEP 561).
+- Explicitly define `**__all__`** in `__init__.py` to document the public surface.
+- Add an empty `**py.typed**` file to enable type checking for downstream consumers (PEP 561).
 - Follow **semantic versioning (semver)** for published packages: **MAJOR.MINOR.PATCH** with clear changelog notes for breaking vs additive changes.
 
 ---
@@ -226,5 +248,6 @@ Run `integration` tests only against a dev/staging environment, not on every PR.
 4. Add **pytest** per using-pytest; keep tests fast and layered.
 5. For services: **FastAPI** and/or **Strawberry**; **SQLAlchemy** + **Alembic** if persistence applies.
 6. Configure **structured JSON** logging with **wide-event** fields; no system Python in docs or scripts.
-7. Set up **`pydantic-settings`** for configuration; commit `.env.example`, never `.env`.
+7. Add `**settings.py`** with `**pydantic-settings**` (`BaseSettings`) and `**Final**` constants as needed; commit `.env.example`, never `.env`.
 8. For libraries: add `py.typed` and define `__all__` in `__init__.py`.
+
