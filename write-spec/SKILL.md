@@ -37,14 +37,24 @@ Required sections (omit only if truly N/A):
 - **Actors** — table: actor | description | permissions.
 - **Functional Requirements** — `FR-NNN` in Given/When/Then, with MoSCoW priority.
 - **Business Rules** — `BR-NNN`: rule, rationale, exceptions.
-- **Non-Functional Requirements** — each must include a measurable threshold.
+- **Non-Functional Requirements** — each must include a measurable threshold (absolute value or explicit relative bound with a baseline; "fast" and "as today" are not measurable).
 - **Data & Interfaces** — only what this spec touches.
 - **Verification Criteria** — see §3.
 - **Open Questions**, **Assumptions**.
 
+**Open Questions discipline**: An Open Question is a placeholder for a decision not yet made. When the decision is made, fold it back into the normative section it belongs to (FR, BR, Data, or Scope) and remove the question. A shipped spec must have zero unresolved Open Questions. Never answer an Open Question with a freestanding "Resolution Note" or "Implementation Note" section.
+
 ## 3. Verification criteria (the core)
 
-Every FR, BR, and measurable NFR needs at least one VC.
+Every **FR and BR** needs at least one VC. Measurable NFRs don't each need a VC — a single end-to-end check covering the relevant NFR thresholds is sufficient.
+
+**Default form (one line)** — use this whenever the failure mode is just the scenario inverted:
+
+```
+VC-NNN: <scenario> → <observable expected result>
+```
+
+**Long form** — use only when the failure mode is independent of the happy path and worth describing separately:
 
 ```
 VC-NNN: <title>
@@ -59,15 +69,11 @@ Rules:
 - Describe outcomes, never implementation.
 - Cover happy path, failure path, and boundaries (empty/null/max/min/duplicate).
 - If you can't write a VC for a requirement, you don't understand it yet.
+- **Expected Result must be unconditional**: no "if X exists, verify via Y; otherwise verify indirectly." If the result depends on optional infrastructure, either make the infrastructure required or split into two VCs.
 
 ## 4. Before declaring ready
 
-- Every FR and BR has a VC.
-- No ambiguous words ("fast", "gracefully", "appropriate").
-- No implementation leaks ("use Redis", "call X API").
-- Open Questions don't block the core path.
-
-When the draft feels complete, run `/review-spec` on the file to get a structured review across ten quality dimensions. Address any `[MUST]` items before moving on to `/write-spec-plan`.
+When the draft feels complete, run `/review-spec` on the file. Its 6-dimension checklist is the **authoritative** definition of "ready." Address every `[MUST]` item before moving on to `/write-spec-plan`.
 
 ## Anti-patterns
 
@@ -78,7 +84,14 @@ When the draft feels complete, run `/review-spec` on the file to get a structure
 | "Validate input" | List every field, type, range, format |
 | FR with "and" | Split into two FRs |
 | "As discussed" | Inline the decision and rationale |
+| "Resolution Note" / "Implementation Note" section | Fold the decision into the FR, BR, or Data section it affects |
+| VC Expected Result with "if X exists ... otherwise verify indirectly" | Make the observable concrete or split into two VCs |
+| NFR threshold "same as today" / "dominated by X" | State an absolute bound or a named baseline measurement that can be re-run |
 
 ---
+
+## Appendix: child specs
+
+When a spec extends a parent spec, new requirements introduced in the child must use a distinct numeric range (e.g., parent uses 0xx–099, child uses 1xx). Requirements *re-stated or imported* from the parent must cite the parent's identifier (e.g., "per FR-015 from spec-01") rather than being renumbered — renumbering creates two authoritative IDs for the same rule.
 
 *Optional doc hygiene:* add Version, Last Updated, Status, Owner, and a Changelog when the spec will be maintained over time.

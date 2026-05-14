@@ -12,7 +12,7 @@ description: >-
 
 # Implementation Plan Skill
 
-Generate a detailed, iterative implementation plan from a spec file and write it to disk.
+Generate an iterative implementation plan from a spec file and write it to disk.
 
 ## 0. Prerequisite
 
@@ -30,23 +30,15 @@ Read the full spec file at the path provided. If no path is given, ask the user 
 
 ## 3. Write the plan
 
-Write the plan to the output file using the structure below.
-
----
-
-## Plan structure
-
 ### Header
 
 - Title: `# Implementation Plan: [Feature Name]`
-- Spec reference: link or path to the original spec file
+- Spec reference: link or path to the original spec
 - Brief summary (2–3 sentences) of what is being built
-
----
 
 ### Iterations
 
-Split the implementation into **self-contained iterations**. Each iteration must use this template:
+Split the implementation into self-contained iterations. Each iteration uses this template:
 
 ```
 ## Iteration N: [Name]
@@ -54,40 +46,31 @@ Split the implementation into **self-contained iterations**. Each iteration must
 **Goal**: One sentence describing what this iteration achieves.
 
 **Scope**:
-- Bullet list of what will be implemented
-
-**Out of scope** (deferred to later iterations):
-- Anything explicitly excluded
+- Bullet list of what will be implemented (including any docs that are real deliverables for this iteration)
 
 **Success criteria**:
 - Concrete, verifiable conditions that must ALL be true before this iteration is complete
-- Each criterion must reference the `VC-NNN` from the spec it satisfies (e.g., "VC-002: …")
+- Each criterion references the `VC-NNN` from the spec it satisfies (e.g., "VC-002: …")
 - Include specific test commands and expected outcomes
-- Example: `docker compose exec testing uv run pytest tests/unit/test_foo.py` → all tests pass
 
-**Documentation updates**:
-- List every doc that must be updated: API docs, usage guides, README sections, inline docstrings, etc.
-- Be specific: "Update `docs/api.md` section X", not "update docs"
-
-**Commit message** (draft):
-- One-line summary of what this iteration delivers
+**Commit message**: One-line summary of what this iteration delivers.
 
 ---
 ```
 
+The **final iteration** must include documentation updates as explicit scope items — all docs ship before the final commit, not earlier and not later.
+
 ### Iteration rules (enforce in the plan)
 
 1. **Gate** — each iteration may NOT start until the previous iteration's success criteria are fully verified.
-2. **Tests green** — every iteration must leave all existing tests passing; new code must have tests; no known failures.
-3. **Commit** — each iteration ends with a single git commit of all its changes on the current branch.
-4. **Docs** — every iteration updates relevant documentation before the commit.
-5. **No orphaned state** — if an iteration is stopped mid-way, the codebase must still be in a working state (no broken imports, no half-implemented features called by existing code).
-
----
+2. **Tests green** — every iteration must leave the iteration's own tests passing; the full regression suite is run once at the end (see Final Verification).
+3. **Commit** — each iteration ends with a single git commit of all its changes.
+4. **Docs in the final iteration** — all documentation updates ship in the last iteration. No half-documented intermediate states.
+5. **No orphaned state** — if an iteration is stopped mid-way, the codebase must still build and existing tests must still pass.
 
 ### Final Verification
 
-After all iterations, append a **Final Verification** section:
+After all iterations, append:
 
 ```
 ## Final Verification
@@ -100,10 +83,8 @@ Cross-check each requirement from the original spec:
 | BR-002      | VC-004  | Iter 2       | How to verify        |
 | ...         | ...     | ...          | ...                  |
 
-**Final acceptance test**: commands to run that prove the full spec is met end-to-end.
+**Final acceptance test**: commands to run that prove the full spec is met end-to-end, including the full regression suite.
 ```
-
----
 
 ## Format guidelines
 

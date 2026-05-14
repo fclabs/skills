@@ -18,6 +18,7 @@ A collection of Claude Code skills for AI-driven development workflows.
 |---|---|
 | [implement-spec-plan](implement-spec-plan/SKILL.md) | Executes a plan file one iteration at a time, verifying acceptance criteria and running full regression tests before advancing. |
 | [verify-spec](verify-spec/SKILL.md) | Confirms the codebase fully satisfies a spec by walking through each iteration's acceptance criteria and running the full test suite. |
+| [freeze-spec](freeze-spec/SKILL.md) | Distills a completed spec into a compact, immutable "context capsule" — preserving purpose, public interfaces, key decisions, and known limits while dropping internal mechanics — for use as background context in future work. |
 
 ### Domain Modeling
 
