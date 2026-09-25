@@ -16,6 +16,23 @@ description: >-
 When an AI implements the spec, ambiguity becomes silent failure.
 Two things matter: **unambiguous requirements** and **testable verification**.
 
+## 0. Load existing context
+
+Before discovery, find what is already known about the code this spec touches:
+
+- **Frozen capsules** — `*-frozen.md` files from `/freeze-spec`, usually next to the specs. They record shipped behavior and never change.
+- **Baseline capsules** — `<docs>/codebase/capsules/*.md` (or `<docs>/codebase/<unit>/capsules/*.md`) from `/document-codebase`. They record existing behavior at their `Commit:`.
+
+Read the capsules for the modules in scope; skip the rest. Treat them as follows:
+
+- **Public interfaces / data** are the contracts this spec must respect or explicitly change. Cite them in Data & Interfaces (e.g., "per `capsules/billing.md`") instead of re-deriving them.
+- **Known limits** are constraints; carry the relevant ones into NFRs or Scope/Out.
+- Anything labelled `[inferred]` or `[unknown]` in a baseline capsule is not a fact. If the spec depends on it, confirm it with the user or record an Open Question.
+- If a baseline capsule's `Commit:` is behind `HEAD` and `git diff --name-only <commit>..HEAD -- <its Source path>` lists files, tell the user it may be stale and suggest refreshing it with `/document-codebase`.
+- If a frozen and a baseline capsule disagree, the baseline describes current code; raise the disagreement as an Open Question.
+
+If the spec changes existing code that has neither kind of capsule, suggest running `/document-codebase` on those modules first. Don't run it yourself; continue if the user declines.
+
 ## 1. Discover before drafting
 
 Ask until you can answer, for each feature:

@@ -31,6 +31,12 @@ the skill directory itself, not the `skills/` wrapper.
 | [verify-spec](skills/verify-spec/SKILL.md) | Confirms the codebase fully satisfies a spec by walking through each iteration's acceptance criteria and running the full test suite. |
 | [freeze-spec](skills/freeze-spec/SKILL.md) | Distills a completed spec into a compact, immutable "context capsule" — preserving purpose, public interfaces, key decisions, and known limits while dropping internal mechanics — for use as background context in future work. |
 
+### Brownfield Discovery
+
+| Skill | Description |
+|---|---|
+| [document-codebase](skills/document-codebase/SKILL.md) | Reverse-engineers an existing repository into evidence-backed docs (architecture, data model, interfaces, key flows, ops, security, tech debt, reconstructed decisions), with `file:line` citations and confidence labels, plus optional baseline capsules for `write-spec`. |
+
 ### Domain Modeling
 
 | Skill | Description |

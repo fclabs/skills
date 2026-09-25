@@ -365,7 +365,9 @@ keep them from tangling:
   eventually disagree.
 - **Feed frozen capsules forward.** When writing spec 03, include the frozen
   capsules of 01 and 02 as context rather than the full specs. That's exactly
-  what they're for.
+  what they're for. `/write-spec` looks for them itself, along with the
+  baseline capsules `/document-codebase` writes for existing code that was
+  never specced.
 
 ---
 
