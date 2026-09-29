@@ -21,11 +21,11 @@ Two things matter: **unambiguous requirements** and **testable verification**.
 Before discovery, find what is already known about the code this spec touches:
 
 - **Frozen capsules** — `*-frozen.md` files from `/freeze-spec`, usually next to the specs. They record shipped behavior and never change.
-- **Baseline capsules** — `<docs>/codebase/capsules/*.md` (or `<docs>/codebase/<unit>/capsules/*.md`) from `/document-codebase`. They record existing behavior at their `Commit:`.
+- **Baseline capsules** — `<docs>/codebase/capsules/**/*.md` (or `<docs>/codebase/<unit>/capsules/**/*.md`) from `/document-codebase`. They mirror the code's folder layout (a service under `src/services/` has its capsule under `capsules/services/`) and record existing behavior at their `Commit:`.
 
 Read the capsules for the modules in scope; skip the rest. Treat them as follows:
 
-- **Public interfaces / data** are the contracts this spec must respect or explicitly change. Cite them in Data & Interfaces (e.g., "per `capsules/billing.md`") instead of re-deriving them.
+- **Public interfaces / data** are the contracts this spec must respect or explicitly change. Cite them in Data & Interfaces (e.g., "per `capsules/services/invoice-billing.md`") instead of re-deriving them.
 - **Known limits** are constraints; carry the relevant ones into NFRs or Scope/Out.
 - Anything labelled `[inferred]` or `[unknown]` in a baseline capsule is not a fact. If the spec depends on it, confirm it with the user or record an Open Question.
 - If a baseline capsule's `Commit:` is behind `HEAD` and `git diff --name-only <commit>..HEAD -- <its Source path>` lists files, tell the user it may be stale and suggest refreshing it with `/document-codebase`.

@@ -64,7 +64,11 @@ discovery on what changed".
    files across all sections, including unaffected ones; an unaffected
    section's `Commit:` can then move to `HEAD`, because nothing else it cites
    changed. For deleted files, remove or re-source the claims that cited
-   them; never leave a citation to a file that no longer exists.
+   them; never leave a citation to a file that no longer exists. Keep the
+   capsule tree mirroring the code (SKILL.md §1): when a code folder is
+   renamed or moved, rename or move its docs folder to match, and update the
+   inventory's doc paths and the links that point to them. Capsule file
+   names stay as they are unless the module's responsibility changed.
 9. **Regenerate** the affected sections and capsules (or the whole file in the
    single-file layout); re-check every citation in them and fix drifted
    lines; update their header `Commit:`, `Worktree:`, `Generated:`, and
