@@ -37,6 +37,12 @@ the skill directory itself, not the `skills/` wrapper.
 |---|---|
 | [document-codebase](skills/document-codebase/SKILL.md) | Reverse-engineers an existing repository into evidence-backed docs (architecture, data model, interfaces, key flows, ops, security, tech debt, reconstructed decisions), with `file:line` citations and confidence labels, plus optional baseline capsules for `write-spec`. |
 
+### Peer Review
+
+| Skill | Description |
+|---|---|
+| [ask-your-coworker-for-feedback](skills/ask-your-coworker-for-feedback/SKILL.md) | Asks the other agents installed locally (Claude Code, Codex, Cursor Agent, Gemini CLI) for read-only, evidence-backed feedback on an output — one subagent per coworker — then has a separate arbiter agent verify each point and say which are correct or do not apply. Includes detect/ask helper script. |
+
 ### Domain Modeling
 
 | Skill | Description |
