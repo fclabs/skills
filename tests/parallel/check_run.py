@@ -396,6 +396,161 @@ def check_vc013(ctx: Context, f: Findings) -> None:
 
 
 # --------------------------------------------------------------------------
+# S2 notes, S3, S4: transcript-text checks (VC-012, VC-014, VC-015)
+# --------------------------------------------------------------------------
+
+DOC_PATH_RE = re.compile(r"`(docs/[^`\s]+)`")
+DOC_FORBIDDEN_RE = re.compile(r"plan\.md|-artifacts|iterations?\b", re.I)
+DOC_SPEC_RE = re.compile(r"\bspec\b", re.I)
+GROUP_A_RE = re.compile(r"\b[Gg]roup\W{0,3}A\b")           # VC-014: capital-or-small g, capital A
+SEQUENTIAL_RE = re.compile(r"sequential|downgrad", re.I)
+ITERATION_2_RE = re.compile(r"iteration 2", re.I)
+
+
+def find_text_block(blocks: list[hlib.TextBlock], *patterns: re.Pattern[str]) -> hlib.TextBlock | None:
+    """First orchestrator text block (transcript order) that matches EVERY pattern.
+    Matching is per block: a message's several text blocks are judged one by one."""
+    for b in blocks:
+        if all(p.search(b.text) for p in patterns):
+            return b
+    return None
+
+
+def final_text(blocks: list[hlib.TextBlock]) -> str:
+    """Text of the last orchestrator-level assistant text block ('' when none)."""
+    return blocks[-1].text if blocks else ""
+
+
+def first_call(calls: list[hlib.ToolUse]) -> hlib.ToolUse | None:
+    return min(calls, key=lambda c: c.event_index) if calls else None
+
+
+def merge_count(repo: Path) -> int:
+    return int(git(repo, "rev-list", "--merges", "--count", "main").strip() or "0")
+
+
+def doc_files(plan: Plan) -> list[str]:
+    """Doc files (Parsing rules): backticked `docs/...` paths in the final iteration's
+    Scope, in order and de-duplicated, plus README.md."""
+    out: list[str] = []
+    if plan.iterations:
+        last = max(plan.iterations, key=lambda i: i.n)
+        scope = hlib.field_text(last.body, "Scope") or ""
+        for m in DOC_PATH_RE.finditer(scope):
+            p = m.group(1).rstrip(".,;:")
+            if p not in out and not p.endswith("/") and ".." not in p.split("/"):
+                out.append(p)
+    return out + ["README.md"]
+
+
+@check("VC-012", ("full",))
+def check_vc012(ctx: Context, f: Findings) -> None:
+    """NON-GATING (spec D12): every doc file exists and avoids plan/artifact/iteration
+    references and the word `spec`. Findings go to notes only, never to violations."""
+    files = doc_files(ctx.plan)
+    problems = 0
+    for rel in files:
+        p = ctx.repo / rel
+        if not p.is_file():
+            f.notes.append(f"VC-012: doc file missing: {rel}")
+            problems += 1
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        hits = sorted({m.group(0).lower() for m in DOC_FORBIDDEN_RE.finditer(text)})
+        if hits:
+            f.notes.append(f"VC-012: {rel} contains plan/iteration references: {', '.join(hits)}")
+            problems += 1
+        if DOC_SPEC_RE.search(text):
+            f.notes.append(f"VC-012: {rel} contains the word 'spec'")
+            problems += 1
+    if not problems:
+        f.notes.append(f"VC-012: ok: {len(files)} doc file(s) checked")
+
+
+@check("VC-014", ("downgrade",))
+def check_vc014(ctx: Context, f: Findings) -> None:
+    """S3: group A is announced (text block naming group A, pyproject.toml and
+    sequential/downgrade) before the first member call; no worktree isolation;
+    iteration 2's call returned before iteration 3's was issued, in separate
+    messages; no merge commit on main; commits for 2 and 3 in ascending order."""
+    calls = hlib.agent_calls(ctx.tr.events)
+    attributed = attribute_agent_calls(ctx.plan, calls)
+    c2, c3 = first_call(attributed.get(2, [])), first_call(attributed.get(3, []))
+    if c2 is None and c3 is None:
+        f.add("VC-014", "no Agent call is attributable to iteration 2 or 3")
+    else:
+        for n, c in ((2, c2), (3, c3)):
+            if c is None:
+                f.add("VC-014", f"no Agent call is attributable to iteration {n}")
+        first = min(c.event_index for c in (c2, c3) if c is not None)
+        block = find_text_block(hlib.text_blocks(ctx.tr.events),
+                                GROUP_A_RE, re.compile(r"pyproject\.toml"), SEQUENTIAL_RE)
+        if block is None:
+            f.add("VC-014", "no assistant text block names group A, pyproject.toml and "
+                  "sequential/downgrade together")
+        elif block.event_index > first:
+            f.add("VC-014", "the group A announcement comes after the first member Agent call")
+        if c2 is not None and c3 is not None:
+            res = hlib.tool_results(ctx.tr.events).get(c2.id)
+            if c2.msg_index == c3.msg_index:
+                f.add("VC-014", "the Agent calls for iterations 2 and 3 are in one assistant message")
+            elif res is None or res.event_index > c3.event_index:
+                f.add("VC-014", "iteration 3's Agent call was issued before iteration 2's returned")
+    for c in calls:
+        if c.input.get("isolation") == "worktree":
+            f.add("VC-014", "an Agent call has isolation \"worktree\" (the group must be downgraded)")
+            break
+    n = merge_count(ctx.repo)
+    if n:
+        f.add("VC-014", f"main has {n} merge commit(s), expected 0")
+    fp = first_parent_commits(ctx.repo)
+    pos: dict[int, int] = {}
+    for i, c in enumerate(fp):
+        it = commit_iteration(ctx.repo, c)
+        if it in (2, 3) and it not in pos:
+            pos[it] = i
+    if 2 not in pos or 3 not in pos:
+        f.add("VC-014", "main lacks a commit for iteration " + " and ".join(
+            str(n) for n in (2, 3) if n not in pos))
+    elif pos[2] > pos[3]:
+        f.add("VC-014", "the commit for iteration 3 precedes the commit for iteration 2")
+
+
+@check("VC-015", ("failing-member",))
+def check_vc015(ctx: Context, f: Findings) -> None:
+    """S4: no merge on main; final text names iteration 2, price_cents and -1; each
+    group's member calls were issued in one assistant message with isolation worktree.
+    The unmerged branches are a note only (spec D3 does not require them)."""
+    n = merge_count(ctx.repo)
+    if n:
+        f.add("VC-015", f"main has {n} merge commit(s), expected 0")
+    text = final_text(hlib.text_blocks(ctx.tr.events))
+    if not ITERATION_2_RE.search(text):
+        f.add("VC-015", "the final assistant text does not name iteration 2")
+    for needle in ("price_cents", "-1"):
+        if needle not in text:
+            f.add("VC-015", f"the final assistant text does not mention {needle}")
+    groups = plan_groups(ctx.plan)
+    if not groups:
+        f.add("VC-015", "the plan has no parallel group")
+    attributed = attribute_agent_calls(ctx.plan, hlib.agent_calls(ctx.tr.events))
+    for g, ns in groups.items():
+        members: list[hlib.ToolUse] = []
+        for m in ns:
+            mine = attributed.get(m, [])
+            if not mine:
+                f.add("VC-015", f"group {g}: no Agent call attributed to iteration {m}")
+            members += mine
+            if any(c.input.get("isolation") != "worktree" for c in mine):
+                f.add("VC-015", f"group {g}: Agent call for iteration {m} lacks isolation \"worktree\"")
+        if len({c.msg_index for c in members}) > 1:
+            f.add("VC-015", f"group {g}: member Agent calls were not issued in one assistant message")
+    unmerged = sorted(ln.strip().lstrip("*+ ").strip()
+                      for ln in git(ctx.repo, "branch", "--no-merged", "main").splitlines() if ln.strip())
+    f.notes.append("VC-015: unmerged branches: " + (", ".join(unmerged) if unmerged else "none"))
+
+
+# --------------------------------------------------------------------------
 # mode (a): check a run
 # --------------------------------------------------------------------------
 

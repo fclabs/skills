@@ -91,3 +91,27 @@ Ids are the plan's `D-NNN`; spec decisions are cited as `spec D5`.
 **Decision**: VC-009 requires the merges to sit at consecutive first-parent positions followed immediately by the Reconcile commit (so out-of-order merges, a commit in between and a Reconcile for the wrong range all fail), a Reconcile touching any file named `CONTEXT.md`, and `git worktree list` with exactly one entry, checked once for the run. VC-010's "one record per iteration" means exactly one `iterations/NN-*.md` on main for each plan iteration (zero or two fail). VC-011 checks every `DECISIONS.md` on main, takes ids from headings only, and treats a missing file as a violation.
 **Rejected**: Accepting duplicate records; reading ids from the whole text (body cross-references would count).
 **Consequences**: Plans with no groups pass VC-008/009 vacuously; VC-010/011/013 still apply.
+
+## D-016: VC-014 text-block matching and attribution edge cases  (Iteration 6)
+**Context**: The spec says "the first assistant text block matching ... precedes the first Agent call attributed to iteration 2 or 3" but not how multi-block messages, a single attributable call, or event ties are handled.
+**Decision**: Matching is per text block: group A (`\b[Gg]roup\W{0,3}A\b`), `pyproject.toml` and `sequential|downgrad` must all occur in ONE block (pieces spread over blocks fail). The first matching block is compared with the earliest attributed call by position in the event list (`event_index`), so a text event placed before a tool_use of the same message counts as preceding. If neither iteration 2 nor 3 has an attributed call: violation (spec); if only one has: also a violation, and the ordering checks are skipped. "Calls returned" means iteration 2's `tool_result` sits before iteration 3's call in the event list and the two calls are in different assistant messages. Commits for iterations 2 and 3 must both exist on main's first-parent line, 2 first. The isolation check covers every orchestrator Agent call, not only attributed ones.
+**Rejected**: Treating a single attributable call as enough (order cannot be verified); pooling all text of a message (the spec says "block").
+**Consequences**: A real executor whose member prompts do not quote the iteration Goal reads as unattributable; Iteration 9 must confirm real prompts.
+
+## D-017: VC-012 resolves docs in the working tree and always emits a note  (Iteration 6)
+**Context**: VC-012 is non-gating (spec D12); selftest cases can assert only the presence of a note (`notes_contain`), not its absence, and changing `run.sh` is out of scope.
+**Decision**: Doc files are the backticked `docs/...` paths in the final iteration's `**Scope**` field (files only, `..` dropped) plus `README.md`, read from the working tree (not `main`). Each problem is one note (`doc file missing`, forbidden plan/artifact/iteration words listed sorted and lowercase, the word `spec`); a clean run emits `VC-012: ok: N doc file(s) checked`, so cases can prove cleanliness. Nothing ever goes to `violations`.
+**Rejected**: A silent clean run (untestable without a run.sh change); reading `main:` blobs (the spec says the file exists, and the VC-013 copy already uses the working tree).
+**Consequences**: Notes carry the `VC-012:` prefix in the result file for the README's reader.
+
+## D-018: VC-015 scope  (Iteration 6)
+**Context**: The spec names "group B" but the checker should not hard-code a letter; "final orchestrator-level assistant text" can span several blocks.
+**Decision**: The final text is the last orchestrator text block. The member-call rule applies to every group in the plan (S4's plan has only B) and a plan without any group is a violation, as is a member with no attributed call. Unmerged branches are always a note (`VC-015: unmerged branches: a, b` sorted, or `none`); fewer than two does not fail (spec D3).
+**Rejected**: Hard-coded group letter or member numbers (BR-001 favours structure); failing when a passing member's branch is absent (D3 does not require it).
+**Consequences**: A final sign-off block after the failure report fails VC-015 (case `s4-bad-vc015-only-earlier-text-names-the-failure`).
+
+## D-019: Downgrade and failing-member cases rebuilt on valid runs  (Iteration 6)
+**Context**: Registering VC-014/VC-015 makes every `downgrade`/`failing-member` case run them, so the generic Iteration 4 cases (empty transcripts, `build_transcript(agents=n)`) would trip them.
+**Decision**: Cases whose expectation is "exit 0" or "only NFR-001" for those scenarios (`run-nfr001-downgrade/failing-member-*`, `run-good-result-*`, `run-note-no-result-event`, `run-missing-plan-in-repo-ok-for-downgrade`, subagent-not-counted-other) now use `_s3_case` / `_s4_case` with `extra` unattributed Agent calls; expectations and ids are unchanged. Usage-error cases (exit 2) stay as they were.
+**Rejected**: Letting those cases expect VC-014/VC-015 as well (muddies the one-id rule); restricting registration (VC-014/015 must run in their scenarios).
+**Consequences**: New downgrade/failing-member cases must start from `_s3_case`/`_s4_case`.

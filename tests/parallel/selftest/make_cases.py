@@ -24,6 +24,7 @@ token @DIR@ in any file text becomes the case directory's absolute path.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -57,6 +58,7 @@ class It:
     fdepends: str | None = None        # raw text of the Depends on field; None derives it
     tdepends: str | None = None        # raw text of the table Depends cell
     proto: str = "full"                # full | no-decisions | no-path
+    scope_extra: str = ""              # extra Scope bullet text (e.g. backticked doc paths)
 
 
 def _slug(it: It) -> str:
@@ -109,6 +111,8 @@ def render(its: list[It], style: str = "abs", header: list[tuple[str, str]] | No
         fd = it.fdepends if it.fdepends is not None else (", ".join(map(str, it.depends)) or "none")
         lab = "**Touches:**" if style == "colon" else "**Touches**:"
         scope = ["- Do the work."]
+        if it.scope_extra:
+            scope.append(f"- {it.scope_extra}")
         if it.group is not None:
             rec = "" if it.proto == "no-path" else f"write only `{_record(it)}`; "
             dec = "" if it.proto == "no-decisions" else " and **Proposed decisions**"
@@ -503,7 +507,7 @@ def case_run_refuse_uncommitted_plan() -> Case:
 
 
 def case_run_missing_plan_in_repo_ok_for_downgrade() -> Case:
-    return _run_case("downgrade", build_transcript(), 0, [], repo_kw={"plan_text": None})
+    return _s3_case(0, [], no_plan=True)
 
 
 def case_run_usage_missing_transcript() -> Case:
@@ -549,8 +553,11 @@ def _nfr(scenario: str, n: int, bad: bool, **kw) -> Case:
     if scenario == "full":      # a good S2 history plus unattributed extra Agent calls (7 calls are the plan's)
         return _s2_case(base7(), 1 if bad else 0, ["NFR-001"] if bad else [],
                         tr={"extra": n - 7, "extra_per_message": kw.get("per_message", 1)}, extra=extra)
-    return _run_case(scenario, build_transcript(agents=n, **kw), 1 if bad else 0,
-                     ["NFR-001"] if bad else [], extra=extra)
+    if scenario == "downgrade":     # the S3 plan's 4 calls plus unattributed extras
+        return _s3_case(1 if bad else 0, ["NFR-001"] if bad else [],
+                        tr={"extra": n - 4, **({"tool_name": kw["tool_name"]} if "tool_name" in kw else {})},
+                        extra=extra)
+    return _s4_case(1 if bad else 0, ["NFR-001"] if bad else [], tr={"extra": n - 4}, extra=extra)
 
 
 def case_run_nfr001_full_15_ok() -> Case:
@@ -591,31 +598,27 @@ def case_run_nfr001_subagent_calls_not_counted() -> Case:
 
 
 def case_run_nfr001_subagent_calls_not_counted_other() -> Case:
-    return _run_case("failing-member", build_transcript(agents=6, sub_agents=3), 0, [],
-                     extra={"output_contains": ["subagents: 6"]})
+    return _s4_case(0, [], tr={"extra": 2, "sub_agents": 3}, extra={"output_contains": ["subagents: 6"]})
 
 
 # result file content (BR-004): model, notes, permission_denials
 
 def case_run_good_result_notes() -> Case:
     denial = {"tool_name": "Bash", "tool_use_id": "toolu_x"}
-    return _run_case("downgrade", build_transcript(agents=2, denials=(denial,), model="claude-other"), 0, [],
-                     repo_kw={"dirty": True},
-                     extra={"model": "claude-other", "scenario": "downgrade", "run": 1,
-                            "notes_contain": ["subagents: 2", "skill-source check skipped",
+    return _s3_case(0, [], dirty=True, tr={"denials": (denial,), "model": "claude-other"},
+                    extra={"model": "claude-other", "scenario": "downgrade", "run": 1,
+                           "notes_contain": ["subagents: 4", "skill-source check skipped",
                                               "working tree is dirty",
                                               'permission_denials: [{"tool_name": "Bash", "tool_use_id": "toolu_x"}]']})
 
 
 def case_run_good_result_run_number() -> Case:
-    return _run_case("failing-member", build_transcript(agents=3), 0, [],
-                     args=_run_args("failing-member", run=3),
-                     extra={"scenario": "failing-member", "run": 3, "model": TEST_MODEL})
+    return _s4_case(0, [], run=3, extra={"scenario": "failing-member", "run": 3, "model": TEST_MODEL})
 
 
 def case_run_note_no_result_event() -> Case:
-    return _run_case("downgrade", build_transcript(result=False), 0, [],
-                     extra={"notes_contain": ["transcript has no result event"]})
+    return _s3_case(0, [], tr={"result": False},
+                    extra={"notes_contain": ["transcript has no result event"]})
 
 
 # --summary (BR-004)
@@ -841,12 +844,14 @@ def build_s2_repo(path: Path, its: list[It], plan_text: str, *, defect: str | No
 
 def s2_transcript(its: list[It], *, extra: int = 0, extra_per_message: int = 1, sub_agents: int = 0,
                   prompt_style: str = "goal", split_group: bool = False, no_isolation: tuple = (),
-                  skip_members: tuple = (), final_text: str = "Done.") -> str:
+                  skip_members: tuple = (), final_text: str = "Done.",
+                  upto: int | None = None) -> str:
     """Synthetic S2 transcript: one Agent call per iteration (a group's calls share one
     assistant message with isolation "worktree"), then `extra` unattributed Agent calls.
     prompt_style "goal" quotes the Goal sentence; "name" only `Iteration N: Name`.
     split_group puts the first member in its own message; no_isolation / skip_members
-    list iteration numbers whose call lacks isolation / is not dispatched."""
+    list iteration numbers whose call lacks isolation / is not dispatched; upto stops
+    after the group or iteration containing that number (an aborted run)."""
     ev: list[dict] = [ev_init()]
     counters = {"m": 0, "t": 0}
 
@@ -869,6 +874,8 @@ def s2_transcript(its: list[It], *, extra: int = 0, extra_per_message: int = 1, 
     i = 0
     while i < len(its):
         it = its[i]
+        if upto is not None and it.n > upto:
+            break
         j = i + 1
         while it.group is not None and j < len(its) and its[j].group == it.group:
             j += 1
@@ -1026,6 +1033,312 @@ def case_s2_bad_vc013_unittest_fails() -> Case:
 def case_s2_bad_vc013_wrong_tax() -> Case:
     return _s2_case(base7(), 1, ["VC-013"], repo={
         "final_files": {"tinyshop/tax.py": "def tax_cents(amount):\n    return amount * 9 // 100\n"}})
+
+
+# ------------------------------------- transcript-text builders and cases (VC-012/014/015)
+
+ANNOUNCE = ("Group `A` (iterations 2 and 3) both list pyproject.toml in Touches, so I will "
+            "downgrade it and run the members sequentially.")
+S4_FINAL = ("Stopped: Iteration 2 failed. The criterion `python -c \"import tinyshop.pricing as p; "
+            "assert p.price_cents([]) == -1\"` contradicts `price_cents([]) == 0`.")
+
+
+def s3_its() -> list[It]:
+    """Bad-group-like plan: iterations 2 and 3 share group A and both touch pyproject.toml."""
+    return [
+        It(1, "scaffold", [], None, ["pyproject.toml", "tinyshop/__init__.py", "tests/__init__.py"]),
+        It(2, "pricing", [1], "A", ["pyproject.toml", "tinyshop/pricing.py"]),
+        It(3, "inventory", [1], "A", ["pyproject.toml", "tinyshop/inventory.py"]),
+        It(4, "docs", [2, 3], None, ["docs/overview.md", "docs/usage.md", "README.md"]),
+    ]
+
+
+def s4_its() -> list[It]:
+    """Failing-member-like plan: group B = iterations 2-4 (base5 shape, group letter B)."""
+    its = base5()
+    for it in its[1:4]:
+        it.group = "B"
+    return its
+
+
+def s3_transcript(its: list[It], *, announce: str | None = ANNOUNCE, announce_at: str = "before",
+                  calls: str = "separate", isolation_on: tuple = (), prompt_style: str = "goal",
+                  decoy_texts: tuple = (), final_text: str = "Done.", extra: int = 0,
+                  sub_agents: int = 0, tool_name: str = "Agent", denials: tuple = (),
+                  model: str = TEST_MODEL, result: bool = True) -> str:
+    """Synthetic S3 transcript: optional announcement text, then one Agent call per
+    iteration (no isolation unless listed in isolation_on).
+    announce_at: before (own message, before every call) | same-message (text event first
+    in the message of iteration 2's call) | after-first-call (after iteration 2's call).
+    calls: separate (2 returns before 3 is issued) | one-message | overlap (3 issued
+    before 2 returns).  prompt_style none makes calls unattributable.
+    decoy_texts are non-matching text messages emitted first; extra adds unattributable
+    Agent calls, sub_agents subagent-emitted ones; tool_name, denials, model, result
+    shape the rest of the transcript."""
+    ev: list[dict] = [ev_init(model)]
+    for i, t in enumerate(decoy_texts):
+        ev.append(ev_text(f"msg_d{i}", t))
+    if announce and announce_at == "before":
+        ev.append(ev_text("msg_ann", announce))
+
+    def call(n: int, mid: str) -> dict:
+        p = (f"Execute Iteration {n}.\nGoal: Goal sentence {n}.\nScope: do the work."
+             if prompt_style == "goal" else "do the thing")
+        return ev_assistant(mid, blk_agent(f"toolu_{n}", "worktree" if n in isolation_on else None,
+                                           name=tool_name, prompt=p))
+
+    for n in (1,):
+        ev += [call(n, f"msg_a{n}"), ev_tool_result(f"toolu_{n}")]
+    if announce and announce_at == "same-message":
+        ev.append(ev_text("msg_a2", announce))
+    if calls == "one-message":
+        ev += [call(2, "msg_a2"), call(3, "msg_a2"), ev_tool_result("toolu_2"), ev_tool_result("toolu_3")]
+    elif calls == "overlap":
+        ev += [call(2, "msg_a2"), call(3, "msg_a3"), ev_tool_result("toolu_2"), ev_tool_result("toolu_3")]
+    else:
+        ev.append(call(2, "msg_a2"))
+        if announce and announce_at == "after-first-call":
+            ev.append(ev_text("msg_ann", announce))
+        ev += [ev_tool_result("toolu_2"), call(3, "msg_a3"), ev_tool_result("toolu_3")]
+    ev += [call(4, "msg_a4"), ev_tool_result("toolu_4")]
+    for x in range(extra):
+        ev += [ev_assistant(f"msg_x{x}", blk_agent(f"toolu_x{x}", None, name=tool_name, prompt="unrelated")),
+               ev_tool_result(f"toolu_x{x}")]
+    for j in range(sub_agents):
+        ev.append(ev_assistant(f"msg_s{j}", blk_agent(f"toolu_sub{j}", None, name=tool_name), parent="toolu_1"))
+    ev.append(ev_text("msg_final", final_text))
+    if result:
+        ev.append(ev_result(denials))
+    return "".join(json.dumps(e) + "\n" for e in ev)
+
+
+def _add_merge(repo: Path) -> None:
+    """A `--no-ff` merge commit on main (side branch with one commit)."""
+    _git(repo, "checkout", "-q", "-b", "side", "main")
+    _commit(repo, {"side.txt": "side\n"}, "Side work")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge branch side", "side")
+
+
+def _add_branches(repo: Path, names: tuple) -> None:
+    """Unmerged branches with one commit each; main is left checked out."""
+    for nm in names:
+        _git(repo, "checkout", "-q", "-b", nm, "main")
+        _commit(repo, {f"{nm}.txt": "member\n"}, f"Work on {nm}")
+        _git(repo, "checkout", "-q", "main")
+
+
+def _s3_case(exit_: int, violations: list[str], *, tr: dict | None = None, merge: bool = False,
+             reorder: bool = False, extra: dict | None = None, scenario: str = "downgrade",
+             transcript: bool = True, dirty: bool = False, no_plan: bool = False) -> Case:
+    its = s3_its()
+    plan = render(its)
+    seq = [dataclasses.replace(i, group=None) for i in its]
+    if reorder:
+        seq = [seq[0], seq[2], seq[1], seq[3]]
+    expect = {"checker": CHECK_RUN, "args": _run_args(scenario), "exit": exit_, "violations": violations}
+    expect.update(extra or {})
+
+    def build(d: Path, seq=seq, plan=plan, merge=merge) -> None:
+        build_s2_repo(d / "repo", seq, plan.replace("@DIR@", "/scratch"))
+        if merge:
+            _add_merge(d / "repo")
+        if no_plan:
+            _git(d / "repo", "rm", "-q", "specs/tinyshop-plan.md")
+            _git(d / "repo", "commit", "-q", "-m", "Remove plan")
+        if dirty:
+            (d / "repo" / "stray.txt").write_text("x\n", encoding="utf-8")
+
+    files = {"plan.md": plan}
+    if transcript:
+        files["transcript.jsonl"] = s3_transcript(its, **(tr or {}))
+    return Case(files, expect, build)
+
+
+def _s4_case(exit_: int, violations: list[str], *, tr: dict | None = None, merge: bool = False,
+             branches: tuple = ("member-3", "member-4"), extra: dict | None = None,
+             run: int = 1) -> Case:
+    its = s4_its()
+    plan = render(its)
+    kw = {"final_text": S4_FINAL, "upto": 4}
+    kw.update(tr or {})
+    expect = {"checker": CHECK_RUN, "args": _run_args("failing-member", run=run), "exit": exit_,
+              "violations": violations}
+    expect.update(extra or {})
+
+    def build(d: Path, plan=plan, merge=merge, branches=branches) -> None:
+        build_repo(d / "repo", plan_text=plan.replace("@DIR@", "/scratch"))
+        if merge:
+            _add_merge(d / "repo")
+        _add_branches(d / "repo", branches)
+
+    return Case({"plan.md": plan, "transcript.jsonl": s2_transcript(its, **kw)}, expect, build)
+
+
+# VC-012: documentation findings are notes only (spec D12)
+
+_DOCS_SCOPE = "Write `docs/overview.md` and `docs/usage.md`."
+
+
+def _docs_its(scope: str = _DOCS_SCOPE) -> list[It]:
+    its = base7()
+    its[-1].scope_extra = scope
+    return its
+
+
+def case_s2_vc012_docs_clean() -> Case:
+    return _s2_case(_docs_its(), 0, [], extra={"notes_contain": ["VC-012: ok: 3 doc file(s) checked"]})
+
+
+def case_s2_vc012_readme_only_when_scope_names_no_docs() -> Case:
+    return _s2_case(base7(), 0, [], extra={"notes_contain": ["VC-012: ok: 1 doc file(s) checked"]})
+
+
+def case_s2_vc012_findings_are_notes_only() -> Case:
+    docs = {"docs/overview.md": "See the spec and the iteration log in plan-artifacts.\n",
+            "README.md": "Built from plan.md\n"}
+    return _s2_case(_docs_its(), 0, [], repo={"final_files": docs}, extra={"notes_contain": [
+        "VC-012: docs/overview.md contains plan/iteration references: -artifacts, iteration",
+        "VC-012: docs/overview.md contains the word 'spec'",
+        "VC-012: README.md contains plan/iteration references: plan.md"],
+        "passed": True})
+
+
+def case_s2_vc012_missing_doc_file_is_a_note() -> Case:
+    return _s2_case(_docs_its("Write `docs/overview.md`, `docs/usage.md` and `docs/guide.md`."), 0, [],
+                    extra={"notes_contain": ["VC-012: doc file missing: docs/guide.md"]})
+
+
+def case_s2_vc012_whole_word_spec_only() -> Case:
+    docs = {"docs/usage.md": "A specification of inspector specs is fine; Spec alone is not.\n"}
+    return _s2_case(_docs_its(), 0, [], repo={"final_files": docs}, extra={"notes_contain": [
+        "VC-012: docs/usage.md contains the word 'spec'"]})
+
+
+# VC-014 (S3) good cases
+
+def case_s3_good_announce_then_sequential() -> Case:
+    return _s3_case(0, [], extra={"output_contains": ["subagents: 4"]})
+
+
+def case_s3_good_announcement_in_same_message_before_call() -> Case:
+    return _s3_case(0, [], tr={"announce_at": "same-message"})
+
+
+def case_s3_good_first_matching_block_not_first_text_block() -> Case:
+    return _s3_case(0, [], tr={"decoy_texts": ("Starting the plan.", "Group B is fine.")})
+
+
+def case_s3_good_lowercase_group_with_punctuation() -> Case:
+    return _s3_case(0, [], tr={"announce": "The group \"A\" members share pyproject.toml; sequential run."})
+
+
+# VC-014 bad cases (each names exactly VC-014; the merge one completes VC-016's run half)
+
+def case_s3_bad_vc014_announcement_after_first_call() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce_at": "after-first-call"})
+
+
+def case_s3_bad_vc014_announcement_missing_pyproject() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce": "Group A has an overlap, so I will run sequentially."})
+
+
+def case_s3_bad_vc014_announcement_missing_group_a() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce": "Both members touch pyproject.toml; running sequentially."})
+
+
+def case_s3_bad_vc014_announcement_missing_sequential_word() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce": "Group A shares pyproject.toml; proceeding."})
+
+
+def case_s3_bad_vc014_pieces_in_different_blocks() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce": "Group A overlaps.", "decoy_texts": (
+        "pyproject.toml is shared.", "I will go sequential.")})
+
+
+def case_s3_bad_vc014_no_announcement() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"announce": None})
+
+
+def case_s3_bad_vc014_worktree_isolation() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"isolation_on": (2,)})
+
+
+def case_s3_bad_vc014_both_calls_in_one_message() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"calls": "one-message"})
+
+
+def case_s3_bad_vc014_iteration_3_before_2_returned() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"calls": "overlap"})
+
+
+def case_s3_bad_vc014_no_attributable_agent_call() -> Case:
+    return _s3_case(1, ["VC-014"], tr={"prompt_style": "none"})
+
+
+def case_s3_bad_vc014_merge_commit_on_main() -> Case:
+    return _s3_case(1, ["VC-014"], merge=True, extra={"output_contains": ["VC-014"]})
+
+
+def case_s3_bad_vc014_commits_out_of_order() -> Case:
+    return _s3_case(1, ["VC-014"], reorder=True)
+
+
+def case_s3_usage_missing_transcript_file() -> Case:
+    """VC-016 run half: the same layout as the merge case, but the transcript is absent."""
+    c = _s3_case(2, [], merge=True, transcript=False, extra={"output_contains": ["transcript not found"]})
+    return c
+
+
+# VC-015 (S4)
+
+def case_s4_good_failing_member_reported() -> Case:
+    return _s4_case(0, [], extra={"notes_contain": ["VC-015: unmerged branches: member-3, member-4"],
+                                  "output_contains": ["subagents: 4"]})
+
+
+def case_s4_good_no_unmerged_branches_is_only_a_note() -> Case:
+    return _s4_case(0, [], branches=(), extra={"notes_contain": ["VC-015: unmerged branches: none"]})
+
+
+def case_s4_bad_vc015_merge_commit_on_main() -> Case:
+    return _s4_case(1, ["VC-015"], merge=True)
+
+
+def case_s4_bad_vc015_final_text_without_price_cents() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"final_text": "Iteration 2 failed; a criterion needs -1."})
+
+
+def case_s4_bad_vc015_final_text_without_minus_one() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"final_text": "Iteration 2 failed in price_cents."})
+
+
+def case_s4_bad_vc015_final_text_without_iteration_2() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"final_text": "Group B failed: price_cents([]) == -1 cannot hold."})
+
+
+def case_s4_bad_vc015_only_earlier_text_names_the_failure() -> Case:
+    """Only the LAST text block counts: the failure is named, then a bland sign-off follows."""
+    its = s4_its()
+    tr = s2_transcript(its, final_text=S4_FINAL, upto=4)
+    tail = [json.dumps(ev_text("msg_bye", "All done."))]
+    lines = tr.splitlines()
+    lines[-1:-1] = tail                      # before the trailing result event
+    c = _s4_case(1, ["VC-015"])
+    c.files["transcript.jsonl"] = "\n".join(lines) + "\n"
+    return c
+
+
+def case_s4_bad_vc015_members_in_two_messages() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"split_group": True})
+
+
+def case_s4_bad_vc015_member_missing_isolation() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"no_isolation": (3,)})
+
+
+def case_s4_bad_vc015_member_not_dispatched() -> Case:
+    return _s4_case(1, ["VC-015"], tr={"skip_members": (4,)})
 
 
 # ------------------------------------------------------------------- framework
