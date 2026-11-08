@@ -29,7 +29,7 @@ repeat:
     2. If findings contain no [MUST] or [SHOULD] items -> exit loop
     3. Triage: ask the operator about every decision-needing finding NOW
     4. Fix the findings in the spec file
-    4. iteration += 1
+    5. iteration += 1
 until exit or iteration > 5
 ```
 
