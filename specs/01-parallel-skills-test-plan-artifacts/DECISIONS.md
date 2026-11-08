@@ -145,3 +145,21 @@ Ids are the plan's `D-NNN`; spec decisions are cited as `spec D5`.
 **Decision**: `full K` with an existing result exits 2 (message names `plan K --force`); `full K --force` on a fresh state also exits 2 with the same hint. Order: existing-result refusal first, then the force refusal, then the D8 skip logic.
 **Rejected**: Silently ignoring `--force` for a fresh `full`.
 **Consequences**: The only way to repeat S2 run K is `plan K --force`, which also repeats S1.
+
+## D-025: accept.sh --pre-live and two test hooks  (Iteration 8)
+**Context**: The plan wants the offline part runnable before any live run, and the live checks (README lines, results dir) testable quickly. `vc_static.sh` is itself called by `accept.sh`, so testing `accept.sh` from it must not recurse.
+**Decision**: `--pre-live` skips the README VC-022/VC-023 lines and the results directory checks and, via `vc_static.sh --pre-live`, tolerates `TBD` in the `claude --version:`/`model:` lines. Test hooks are environment variables, not flags: `ACCEPT_README=<file>` and `ACCEPT_NO_SUITES=1` (skips `selftest/run.sh` and `vc_static.sh`).
+**Rejected**: A `--readme` flag or `--live-only` flag (widens the documented CLI `accept.sh [results-dir]`); letting vc_static call `accept.sh` fully (infinite recursion).
+**Consequences**: `accept.sh` fails without `--pre-live` until the live runs fill the README. The hooks are documented only in the script header and CONTEXT.md.
+
+## D-026: run.sh executed once per acceptance, shared through --runlog  (Iteration 8)
+**Context**: Spec VC-024 says accept.sh passes iff `selftest/run.sh` passes and also runs the static VCs, and the plan says vc_static confirms the VC-017/VC-020 cases ran inside run.sh. Running run.sh in both would double its ~30 s.
+**Decision**: `accept.sh` runs `selftest/run.sh` once into a `mktemp` log and passes it to `vc_static.sh --runlog`, which checks the `PASS` lines of the named VC-017/VC-020 cases and the all-passed summary; run standalone, `vc_static.sh` runs run.sh itself. `vc_static.sh` also runs `vc_setup.sh` and `vc_runscenario.sh`.
+**Rejected**: Two runs of run.sh; accept.sh running vc_setup/vc_runscenario separately (vc_static already does).
+**Consequences**: Renaming those golden cases requires updating the prefixes listed in `vc_static.sh`.
+
+## D-027: README placeholders are line-anchored plain lines  (Iteration 8)
+**Context**: The plan fixes the placeholder texts; accept.sh and vc_static must find the live values later without ambiguity from prose.
+**Decision**: The seven lines sit at line start inside one fenced block under "Recorded results" (accept.sh also tolerates a leading `- `/whitespace). Prose never starts a line with those keys. VC-022a must be exactly `PASS`; `VC-022b` `PASS` or `FAIL`; `VC-023: READY sha256=` needs 64 lowercase hex digits.
+**Rejected**: Table or bullet layout (fragile to match); unanchored grep (prose could satisfy it).
+**Consequences**: Iterations 9-10 replace the lines in place and keep the block.
