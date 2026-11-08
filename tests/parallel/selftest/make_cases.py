@@ -546,6 +546,9 @@ def case_run_usage_no_scenario() -> Case:
 
 def _nfr(scenario: str, n: int, bad: bool, **kw) -> Case:
     extra = {"output_contains": [f"subagents: {n}"]}
+    if scenario == "full":      # a good S2 history plus unattributed extra Agent calls (7 calls are the plan's)
+        return _s2_case(base7(), 1 if bad else 0, ["NFR-001"] if bad else [],
+                        tr={"extra": n - 7, "extra_per_message": kw.get("per_message", 1)}, extra=extra)
     return _run_case(scenario, build_transcript(agents=n, **kw), 1 if bad else 0,
                      ["NFR-001"] if bad else [], extra=extra)
 
@@ -583,8 +586,8 @@ def case_run_nfr001_task_tool_name_counts() -> Case:
 
 
 def case_run_nfr001_subagent_calls_not_counted() -> Case:
-    return _run_case("full", build_transcript(agents=15, sub_agents=5), 0, [],
-                     extra={"output_contains": ["subagents: 15"]})
+    return _s2_case(base7(), 0, [], tr={"extra": 8, "sub_agents": 5},
+                    extra={"output_contains": ["subagents: 15"]})
 
 
 def case_run_nfr001_subagent_calls_not_counted_other() -> Case:
@@ -713,6 +716,316 @@ def case_mark_failed_rejects_unknown_scenario() -> Case:
     return Case({}, {"checker": CHECK_RUN,
                      "args": ["--mark-failed", "--scenario", "smoke", "--run", "1", "--result-out", "r.json"],
                      "exit": 2, "violations": [], "append_result_out": False})
+
+
+# ------------------------------------------------- S2 builders (VC-008..011, VC-013)
+
+ART = "specs/tinyshop-plan-artifacts"
+SMOKE_TEST = ("import unittest\nimport tinyshop\n\n\nclass SmokeTest(unittest.TestCase):\n"
+              "    def test_import(self):\n        self.assertTrue(tinyshop)\n")
+FINAL_STUBS = {
+    "tinyshop/tax.py": "import tomllib\nfrom pathlib import Path\n\n\ndef tax_cents(amount):\n"
+                       "    rates = tomllib.loads((Path(__file__).parent / 'rates.toml').read_text())\n"
+                       "    return amount * rates['tax_bp'] // 10000\n",
+    "tinyshop/discount.py": "import tomllib\nfrom pathlib import Path\n\n\ndef discount_cents(amount):\n"
+                            "    rates = tomllib.loads((Path(__file__).parent / 'rates.toml').read_text())\n"
+                            "    return amount * rates['discount_bp'] // 10000\n",
+    "tinyshop/rates.toml": "tax_bp = 800\ndiscount_bp = 1000\n",
+}
+CONTENT = {"tinyshop/pricing.py": "def price_cents(items):\n    return sum(u * q for u, q in items)\n"}
+
+
+def _commit(path: Path, files: dict[str, str], msg: str) -> None:
+    for rel, text in files.items():
+        p = path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", msg)
+
+
+def _s2_record(it: It) -> str:
+    return f"{ART}/iterations/{it.n:02d}-{_slug(it)}.md"
+
+
+def _touch_files(it: It) -> dict[str, str]:
+    out = {}
+    for t in it.touches:
+        if t.endswith("**"):
+            continue
+        rel = t + "index.md" if t.endswith("/") else t
+        out[rel] = CONTENT.get(rel, f"# stub {rel}\n")
+    return out
+
+
+def build_s2_repo(path: Path, its: list[It], plan_text: str, *, defect: str | None = None,
+                  sep: str = "–", decisions: str | None = None,
+                  final_files: dict[str, str] | None = None) -> None:
+    """Synthetic S2 scratch repo with a realistic history for plan `its` (shell-out to git).
+
+    "Add plan" commit; ungrouped iterations are one commit `Iteration N: name`
+    (record, CONTEXT.md, DECISIONS.md); a group is member branches off one commit,
+    `git merge --no-ff` as `Merge iteration N: name` in ascending order, then
+    `Reconcile artifacts for iterations N<sep>M` touching CONTEXT.md.  The final
+    (ungrouped) iteration also writes the tinyshop stubs for VC-013.
+    defect: diverged-base | merge-order | extra-commit | no-reconcile-context |
+    no-reconcile | worktree-left | late-unmapped | member-context | member-outside |
+    missing-record.  decisions overrides DECISIONS.md in the final commit;
+    final_files overrides/adds files there.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q", "-b", "main")
+    ctx_lines: list[str] = []
+    entries: list[tuple[int, int]] = []     # (decision id, iteration)
+
+    def ctx_file() -> dict[str, str]:
+        return {f"{ART}/CONTEXT.md": "# CONTEXT\n" + "".join(ctx_lines)}
+
+    def dec_file() -> dict[str, str]:
+        body = "".join(f"## D-{i:03d}: decision {i}  (Iteration {n})\nbody\n\n" for i, n in entries)
+        return {f"{ART}/DECISIONS.md": "# DECISIONS\n\n" + body}
+
+    _commit(path, {"README.md": "synthetic\n", "specs/tinyshop-plan.md": plan_text, **ctx_file(), **dec_file()},
+            "Add plan")
+    i = 0
+    while i < len(its):
+        it = its[i]
+        if it.group is None:
+            ctx_lines.append(f"- iteration {it.n}\n")
+            entries.append((len(entries) + 1, it.n))
+            files = {**_touch_files(it), _s2_record(it): f"# Iteration {it.n}\n", **ctx_file(), **dec_file()}
+            if it.n == 1:
+                files.update({"tests/__init__.py": "", "tests/test_smoke.py": SMOKE_TEST})
+            if i == len(its) - 1:
+                files.update(FINAL_STUBS)
+                if decisions is not None:
+                    files[f"{ART}/DECISIONS.md"] = decisions
+                files.update(final_files or {})
+            _commit(path, files, f"Iteration {it.n}: {it.name}")
+            if i == len(its) - 1 and defect == "late-unmapped":
+                _commit(path, {"notes.txt": "late\n"}, "Fix typo")
+            i += 1
+            continue
+        j = i
+        while j < len(its) and its[j].group == it.group:
+            j += 1
+        members = its[i:j]
+        for k, m in enumerate(members):
+            if defect == "diverged-base" and k == 1:
+                _commit(path, {"notes.txt": "interim\n"}, "Interim housekeeping")
+            _git(path, "checkout", "-q", "-b", f"member-{m.n}", "main")
+            files = _touch_files(m)
+            if not (defect == "missing-record" and k == len(members) - 1):
+                files[_s2_record(m)] = f"# Iteration {m.n}\n"
+            if defect == "member-context" and k == 0:
+                files[f"{ART}/CONTEXT.md"] = "# CONTEXT\nmember edit\n"
+            if defect == "member-outside" and k == 1:
+                files["tinyshop/stray.py"] = "# outside Touches\n"
+            _commit(path, files, f"Iteration {m.n}: {m.name}")
+            _git(path, "checkout", "-q", "main")
+        order = list(reversed(members)) if defect == "merge-order" else members
+        for m in order:
+            _git(path, "merge", "-q", "--no-ff", "-m", f"Merge iteration {m.n}: {m.name}", f"member-{m.n}")
+        if defect == "extra-commit":
+            _commit(path, {"notes.txt": "between\n"}, "Tidy notes")
+        for m in members:
+            entries.append((len(entries) + 1, m.n))
+        ctx_lines.append(f"- reconciled {members[0].n}-{members[-1].n}\n")
+        if defect != "no-reconcile":
+            files = dec_file() if defect == "no-reconcile-context" else {**ctx_file(), **dec_file()}
+            _commit(path, files, f"Reconcile artifacts for iterations {members[0].n}{sep}{members[-1].n}")
+        if defect == "worktree-left":
+            _git(path, "worktree", "add", "-q", str(path.parent / "leftover-wt"), "-b", "leftover")
+        i = j
+
+
+def s2_transcript(its: list[It], *, extra: int = 0, extra_per_message: int = 1, sub_agents: int = 0,
+                  prompt_style: str = "goal", split_group: bool = False, no_isolation: tuple = (),
+                  skip_members: tuple = (), final_text: str = "Done.") -> str:
+    """Synthetic S2 transcript: one Agent call per iteration (a group's calls share one
+    assistant message with isolation "worktree"), then `extra` unattributed Agent calls.
+    prompt_style "goal" quotes the Goal sentence; "name" only `Iteration N: Name`.
+    split_group puts the first member in its own message; no_isolation / skip_members
+    list iteration numbers whose call lacks isolation / is not dispatched."""
+    ev: list[dict] = [ev_init()]
+    counters = {"m": 0, "t": 0}
+
+    def prompt(it: It) -> str:
+        if prompt_style == "goal":
+            return f"Execute Iteration {it.n}.\nGoal: Goal sentence {it.n}.\nScope: do the work."
+        return f"Please carry out Iteration {it.n}: {it.name.title()} now."
+
+    def emit(calls: list[tuple[str, str | None]]) -> None:
+        counters["m"] += 1
+        ids = []
+        for p, iso in calls:
+            counters["t"] += 1
+            tid = f"toolu_{counters['t']}"
+            ids.append(tid)
+            ev.append(ev_assistant(f"msg_a{counters['m']}", blk_agent(tid, iso, prompt=p)))
+        for tid in ids:
+            ev.append(ev_tool_result(tid))
+
+    i = 0
+    while i < len(its):
+        it = its[i]
+        j = i + 1
+        while it.group is not None and j < len(its) and its[j].group == it.group:
+            j += 1
+        step = [m for m in its[i:j] if m.n not in skip_members]
+        iso = "worktree" if it.group is not None else None
+        calls = [(prompt(m), None if m.n in no_isolation else iso) for m in step]
+        if it.group is not None and split_group and len(calls) > 1:
+            emit(calls[:1])
+            emit(calls[1:])
+        elif it.group is not None:
+            emit(calls)
+        else:
+            for c in calls:
+                emit([c])
+        i = j
+    for start in range(0, extra, max(extra_per_message, 1)):
+        emit([("extra unrelated work", None)] * min(extra_per_message, extra - start))
+    for s in range(sub_agents):
+        ev.append(ev_assistant(f"msg_s{s}", blk_agent(f"toolu_sub{s}", None), parent="toolu_1"))
+    ev.append(ev_text("msg_final", final_text))
+    ev.append(ev_result())
+    return "".join(json.dumps(e) + "\n" for e in ev)
+
+
+def _s2_case(its: list[It], exit_: int, violations: list[str], *, repo: dict | None = None,
+             tr: dict | None = None, extra: dict | None = None) -> Case:
+    plan = render(its)
+    transcript = s2_transcript(its, **(tr or {}))
+    repo_kw = dict(repo or {})
+    expect = {"checker": CHECK_RUN, "args": _run_args("full"), "exit": exit_, "violations": violations}
+    expect.update(extra or {})
+    return Case({"plan.md": plan, "transcript.jsonl": transcript}, expect,
+                lambda d, its=its, kw=repo_kw, plan=plan: build_s2_repo(
+                    d / "repo", its, plan.replace("@DIR@", "/scratch"), **kw))
+
+
+# good S2 histories (5 and 7 iterations: D-007 applies, a plan this small has 5 at least)
+
+def case_s2_good_7_iterations() -> Case:
+    return _s2_case(base7(), 0, [], extra={"output_contains": ["subagents: 7"]})
+
+
+def case_s2_good_5_iterations() -> Case:
+    return _s2_case(base5(), 0, [], extra={"output_contains": ["subagents: 5"]})
+
+
+def case_s2_good_reconcile_ascii_hyphen() -> Case:
+    return _s2_case(base7(), 0, [], repo={"sep": "-"})
+
+
+def case_s2_good_empty_decisions() -> Case:
+    return _s2_case(base7(), 0, [], repo={"decisions": ""})
+
+
+def case_s2_good_attribution_by_iteration_name() -> Case:
+    return _s2_case(base7(), 0, [], tr={"prompt_style": "name"})
+
+
+def case_s2_good_no_groups() -> Case:
+    its = base5()
+    for it in its:
+        it.group = None
+    return _s2_case(its, 0, [])
+
+
+def case_s2_good_result_notes() -> Case:
+    return _s2_case(base7(), 0, [], extra={"notes_contain": ["subagents: 7", "skill-source check skipped"]})
+
+
+# VC-008: transcript and fork point
+
+def case_s2_bad_vc008_members_in_two_messages() -> Case:
+    return _s2_case(base7(), 1, ["VC-008"], tr={"split_group": True})
+
+
+def case_s2_bad_vc008_missing_isolation() -> Case:
+    return _s2_case(base7(), 1, ["VC-008"], tr={"no_isolation": (3,)})
+
+
+def case_s2_bad_vc008_member_not_dispatched() -> Case:
+    return _s2_case(base7(), 1, ["VC-008"], tr={"skip_members": (4,)})
+
+
+def case_s2_bad_vc008_diverged_fork_points() -> Case:
+    return _s2_case(base7(), 1, ["VC-008"], repo={"defect": "diverged-base"})
+
+
+# VC-009: merge/reconcile history
+
+def case_s2_bad_vc009_merge_order() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "merge-order"})
+
+
+def case_s2_bad_vc009_extra_commit_before_reconcile() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "extra-commit"})
+
+
+def case_s2_bad_vc009_reconcile_without_context() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "no-reconcile-context"})
+
+
+def case_s2_bad_vc009_no_reconcile_commit() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "no-reconcile"})
+
+
+def case_s2_bad_vc009_worktree_left_behind() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "worktree-left"})
+
+
+def case_s2_bad_vc009_unmapped_commit_after_reconcile() -> Case:
+    return _s2_case(base7(), 1, ["VC-009"], repo={"defect": "late-unmapped"})
+
+
+# VC-010: member branch content and records
+
+def case_s2_bad_vc010_member_changes_context() -> Case:
+    return _s2_case(base7(), 1, ["VC-010"], repo={"defect": "member-context"})
+
+
+def case_s2_bad_vc010_member_outside_touches() -> Case:
+    return _s2_case(base7(), 1, ["VC-010"], repo={"defect": "member-outside"})
+
+
+def case_s2_bad_vc010_member_record_missing() -> Case:
+    return _s2_case(base7(), 1, ["VC-010"], repo={"defect": "missing-record"})
+
+
+# VC-011: DECISIONS.md
+
+_DEC_HEAD = "# DECISIONS\n\n"
+
+
+def case_s2_bad_vc011_placeholder_id() -> Case:
+    return _s2_case(base7(), 1, ["VC-011"], repo={
+        "decisions": _DEC_HEAD + "## D-001: a  (Iteration 1)\n\n## D-?: b  (Iteration 2)\n"})
+
+
+def case_s2_bad_vc011_id_gap() -> Case:
+    return _s2_case(base7(), 1, ["VC-011"], repo={
+        "decisions": _DEC_HEAD + "## D-001: a  (Iteration 1)\n\n## D-003: b  (Iteration 2)\n"})
+
+
+def case_s2_bad_vc011_decreasing_iterations() -> Case:
+    return _s2_case(base7(), 1, ["VC-011"], repo={
+        "decisions": _DEC_HEAD + "## D-001: a  (Iteration 5)\n\n## D-002: b  (Iteration 2)\n"})
+
+
+# VC-013: end to end on a copy
+
+def case_s2_bad_vc013_unittest_fails() -> Case:
+    bad = SMOKE_TEST + "\n    def test_fail(self):\n        self.fail('broken')\n"
+    return _s2_case(base7(), 1, ["VC-013"], repo={"final_files": {"tests/test_smoke.py": bad}})
+
+
+def case_s2_bad_vc013_wrong_tax() -> Case:
+    return _s2_case(base7(), 1, ["VC-013"], repo={
+        "final_files": {"tinyshop/tax.py": "def tax_cents(amount):\n    return amount * 9 // 100\n"}})
 
 
 # ------------------------------------------------------------------- framework

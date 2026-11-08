@@ -6,9 +6,9 @@ Harness dir: /Users/fede/devel/fclabs/skills/tests/parallel/ (paths below are re
 Plan decision ids are `D-NNN`; spec decisions are written `spec D5`.
 
 ## Current state
-- Done: Iteration 1 (fixtures), group A (Iteration 2 `setup.sh`, Iteration 3 `hlib.py` + `check_plan.py` + plan golden cases), reconciled; Iteration 4 (`check_run.py` core: three CLI modes, refusals, NFR-001 cost check, check registry, transcript helpers, run-case golden cases).
-- `bash selftest/run.sh` passes 69/69 cases (30 plan + 39 check_run); `bash selftest/vc_setup.sh` prints VC-001/VC-002 PASS.
-- `check_run.py` registers only NFR-001 so far. No `run_scenario.sh`, `accept.sh` or README yet. Next: Iteration 5 (VC-008..011, VC-013).
+- Done: Iteration 1 (fixtures), group A (Iteration 2 `setup.sh`, Iteration 3 `hlib.py` + `check_plan.py` + plan golden cases), reconciled; Iteration 4 (`check_run.py` core: three CLI modes, refusals, NFR-001 cost check, check registry, transcript helpers, run-case golden cases); Iteration 5 (git-history and end-to-end checks VC-008..011 and VC-013, Commit->iteration helper, Member-Agent attribution, S2 repo/transcript builders).
+- `bash selftest/run.sh` passes 94/94 cases (30 plan + 39 check_run + 25 S2; ~25 s); `bash selftest/vc_setup.sh` prints VC-001/VC-002 PASS.
+- `check_run.py` registers NFR-001 (all run scenarios) and VC-008, VC-009, VC-010, VC-011, VC-013 (`full` only). No `run_scenario.sh`, `accept.sh` or README yet. Next: Iteration 6 (VC-012 notes, VC-014, VC-015).
 - `fixture/tinyshop-spec.md` has not been run through `/review-spec` (Iteration 9).
 
 ## File map
@@ -20,10 +20,10 @@ Plan decision ids are `D-NNN`; spec decisions are written `spec D5`.
 - `selftest/vc_setup.sh`: verifies VC-001/VC-002 using temp dirs.
 - `hlib.py`: shared helpers (plan parsing, Touches/Group/Depends rules, Findings, BR-004 result writer, exit codes, stream-json reader). Stdlib only.
 - `check_plan.py`: S1 checker, VC-003..007 and VC-025.
-- `check_run.py`: S2-S4 checker (registry + NFR-001), `--summary`, `--mark-failed`; creates no directories yet.
-- `selftest/make_cases.py`: builds golden cases `<outdir>/<case>/{plan.md,expect.json,...}`; one `case_<name>()` function per case returning `Case(files, expect, build=None)`; also the transcript and repo builders.
+- `check_run.py`: S2-S4 checker (registry, NFR-001, VC-008..011, VC-013), `--summary`, `--mark-failed`; its only directory creation is the VC-013 `tempfile` copy.
+- `selftest/make_cases.py`: builds golden cases `<outdir>/<case>/{plan.md,expect.json,...}`; one `case_<name>()` function per case returning `Case(files, expect, build=None)`; also the transcript and repo builders (including the S2 builders below).
 - `selftest/run.sh`: builds cases in a temp dir, runs each, asserts exit code, exact violation set, result-file shape, stdout names ids, plus the optional expect.json keys below; exit 0 only if all pass. A case whose checker file is missing FAILS.
-- Artifact dir (`specs/01-parallel-skills-test-plan-artifacts/`): `CONTEXT.md`, `DECISIONS.md`, `iterations/01..04`.
+- Artifact dir (`specs/01-parallel-skills-test-plan-artifacts/`): `CONTEXT.md`, `DECISIONS.md`, `iterations/01..05`.
 
 ## Public interfaces
 `setup.sh <dir>`:
@@ -55,14 +55,18 @@ Plan decision ids are `D-NNN`; spec decisions are written `spec D5`.
 - Exit: 0 ok; 1 violations (or summary with < 2 passes); 2 usage/refusal/unparseable (also argparse errors, summary with < 3 files, `--violation` other than skipped/error).
 - Check registry: `@check(vc_id, scenarios=RUN_SCENARIOS)` appends `Check(vc_id, scenarios, fn)` to `CHECKS`; `fn(ctx, findings)` with `ctx = Context(repo: Path, plan: hlib.Plan, tr: hlib.Transcript, scenario, run)`; report with `findings.add(vc_id, msg)` (violation) or `findings.notes.append(text)` (note). Iterations 5-6 only add decorated functions.
 - Helpers: `git(repo, *args, check=True) -> stdout` and `git_ok(repo, *args) -> bool` (always `git -C`, env `GIT_OPTIONAL_LOCKS=0`), `max_agents(scenario)`, `refuse_repo(repo, scenario)`, constants `MAX_AGENTS_S2=15`, `MAX_AGENTS_OTHER=6`, `PLAN_IN_REPO="specs/tinyshop-plan.md"`.
-- Messages (stderr, prefix `check_run.py: error: `): `transcript not found: <path>`, `transcript line N is not JSON`, `transcript has no system init event`, `init event carries no model`, `transcript has no assistant events`, `repository not found: <path>`, `refusing to check the skills repository itself: <top>`, `specs/tinyshop-plan.md is not committed on main in <repo>`, `results directory not found: <d>`, `result file <p> does not have the BR-004 shape`, `summary S: fewer than 3 result files`.
+- Git-history helpers (Iteration 5, all in `check_run.py`): `Commit(sha, parents, subject)`; `first_parent_commits(repo) -> list[Commit]` (main, oldest first); `commit_iteration(repo, c) -> int|None` (Commit->iteration: lowest `iterations/NN-*.md` added by the commit, for a merge by `parents[0]..parents[1]`; else `Iteration N` in the subject, case-insensitive; else None); `plan_groups(plan) -> {group: [n,...]}` (table cells); `attribute_agent_calls(plan, calls) -> {n: [ToolUse]}` (verbatim Goal, whitespace-normalised, earliest in prompt; else earliest `Iteration N: <name>`; else dropped); `find_merge(repo, fp, n)` (subject `Merge iteration N: `, else merge commit mapping to n); `branch_base(repo, merge, main_fp)` (fork point of a member branch). Regexes `RECORD_RE`, `MERGE_RE`, `RECONCILE_RE` (en dash or hyphen), `SUBJECT_ITER_RE`; `ARTIFACT_FILES`.
+Registered S2 checks (scenario `full`): VC-008 (per group: attributed calls in one `msg_index`, `isolation == "worktree"`, one common fork point; missing merge commit is only a note), VC-009 (per group: ascending `Merge iteration N:` directly followed by exactly one Reconcile for that range, Reconcile touches a `CONTEXT.md`, later commits map to iterations > group max, unmapped is a violation; once: `git worktree list` has one entry), VC-010 (member branch paths within Touches + own `iterations/NN-*.md`, no CONTEXT.md/DECISIONS.md; main has exactly one record per plan iteration; a missing merge is VC-009's finding), VC-011 (every `DECISIONS.md` on main: no `D-?`, heading ids 1..k, `(Iteration N)` non-decreasing; no file at all is a violation), VC-013 (copytree of the working tree to a `tempfile` directory, `sys.executable -m unittest discover`, then `VC013_DRIVER` via `-c`; removed in `finally`).
+
+Messages (stderr, prefix `check_run.py: error: `): `transcript not found: <path>`, `transcript line N is not JSON`, `transcript has no system init event`, `init event carries no model`, `transcript has no assistant events`, `repository not found: <path>`, `refusing to check the skills repository itself: <top>`, `specs/tinyshop-plan.md is not committed on main in <repo>`, `results directory not found: <d>`, `result file <p> does not have the BR-004 shape`, `summary S: fewer than 3 result files`.
 - Stdout: `subagents: N`, `VC-NNN|NFR-001: message` per violation, `note: ...`, final `check_run: OK|FAIL <ids>`; summary prints `summary S: N files, P passed` and `violations: <union or none>`; mark-failed prints one line.
 - Notes (all in `Findings.notes`, written to the result file): `subagents: N`, `skill-source check skipped` (or `skill-source check requested but not implemented` with the switch), `permission_denials: <json sorted keys>` when non-empty, `transcript has no result event`, `working tree is dirty` (git status --porcelain non-empty; never an error). `--mark-failed` result: `notes=["marked failed: <v>"]`, `model=""`.
 - Refusal order: plan parse, repo (is a dir, git toplevel not the skills repo, plan committed on main for `full` only), then transcript load.
 
 `expect.json`: `{"checker","args","exit","violations"}` plus optional `model`, `scenario`, `run`, `notes_contain` (exact note strings), `passed` (default exit==0), `output_contains` (substrings of stdout+stderr, checked before the exit-2 early return), `append_result_out` (default true; false when args carry `--result-out` or the mode has none), `result_file` (default `result.json`; with `append_result_out` false and no `result_file`, run.sh only looks for the violation ids in stdout). Args run with the case dir as cwd. A `Case` may have `build(casedir)` that creates a repo after files are written.
 
-`make_cases.py` builders (reuse in Iterations 5-6): transcripts `ev_init`, `ev_assistant(mid, block, parent=None)`, `ev_text`, `blk_agent(tuid, isolation=None, name="Agent", prompt)`, `ev_tool_result`, `ev_result(denials)`, `build_transcript(agents, per_message, sub_agents, isolation, tool_name, texts, final_text, denials, model, init, assistant, result) -> jsonl text`; repo `build_repo(path, plan_text=None, commit_plan=True, skills_layout=False, dirty=False)` (git init -b main, one commit, plan at `specs/tinyshop-plan.md`); case helpers `_run_case(scenario, transcript, exit, violations, repo_kw, extra, args, no_repo, no_plan)`, `_run_args`, `_summary_case`, `_mark_case`, `_res`; constants `CHECK_RUN`, `TEST_MODEL`. Case dir layout for run cases: `plan.md`, `transcript.jsonl`, `repo/`.
+`make_cases.py` builders (reuse in Iteration 6): transcripts `ev_init`, `ev_assistant(mid, block, parent=None)`, `ev_text`, `blk_agent(tuid, isolation=None, name="Agent", prompt)`, `ev_tool_result`, `ev_result(denials)`, `build_transcript(agents, per_message, sub_agents, isolation, tool_name, texts, final_text, denials, model, init, assistant, result) -> jsonl text`; repo `build_repo(path, plan_text=None, commit_plan=True, skills_layout=False, dirty=False)` (git init -b main, one commit, plan at `specs/tinyshop-plan.md`); case helpers `_run_case(scenario, transcript, exit, violations, repo_kw, extra, args, no_repo, no_plan)`, `_run_args`, `_summary_case`, `_mark_case`, `_res`; constants `CHECK_RUN`, `TEST_MODEL`. Case dir layout for run cases: `plan.md`, `transcript.jsonl`, `repo/`.
+S2 builders: `build_s2_repo(path, its, plan_text, *, defect=None, sep="–", decisions=None, final_files=None)` (real git history for plan `its`: "Add plan", `Iteration N: name` commits, member branches + `--no-ff` merges + Reconcile; final iteration writes tinyshop stubs; defects: diverged-base, merge-order, extra-commit, no-reconcile-context, no-reconcile, worktree-left, late-unmapped, member-context, member-outside, missing-record); `s2_transcript(its, *, extra, extra_per_message, sub_agents, prompt_style="goal"|"name", split_group, no_isolation, skip_members, final_text)` (one Agent call per iteration, group calls in one message; `extra` adds unattributed calls); `_s2_case(its, exit, violations, repo=, tr=, extra=)` (use a fresh `base7()`/`base5()`); constants `ART`, `FINAL_STUBS`, `SMOKE_TEST`. `full` NFR-001 cases now use `_s2_case` (7 plan calls + `extra`).
 
 Fixture template conventions (parsers must accept):
 - Placeholder `@DIR@` = absolute scratch dir, no trailing slash. Plans are `@DIR@/<name>-plan.md` (`bad-group`, `failing-member`, `smoke-group`); spec `@DIR@/specs/tinyshop-spec.md`; artifact dir `@DIR@/<name>-plan-artifacts/`.
@@ -78,7 +82,7 @@ Fixture template conventions (parsers must accept):
 - Hygiene (plan ground rule 5): no `.sh`/`.py` contains the bypass-permissions flag text (build grep patterns by concatenation); `mkdir`/`makedirs`/`mkdtemp` only in `setup.sh`, `run_scenario.sh`, `selftest/`, `check_run.py`.
 - Harness code is `python3` stdlib only (>= 3.11); fixtures/plans use `python`. Checkers run with `PYTHONDONTWRITEBYTECODE=1`, `GIT_OPTIONAL_LOCKS=0`.
 - Add a golden case: write `case_<name>()` in `selftest/make_cases.py`.
-- Known-good plan golden cases use 5 and 7 iterations (D-007).
+- Known-good plan golden cases and S2 history cases use 5 and 7 iterations (D-007, D-013).
 - `check_run.py` never writes in `<repo>`; it writes only `--result-out`. Notes accumulate in `Findings.notes` and are printed as `note:` lines (the `subagents: N` note is printed on its own line instead).
 - Subagent shells may refuse compound `&&` commands or ones mentioning git env vars; run `bash selftest/run.sh` plainly.
 - Parallel-group worktrees start from the commit at dispatch; members may need `git merge --ff-only` to the latest main to see earlier fixtures.
@@ -94,8 +98,10 @@ From `/Users/fede/devel/fclabs/skills/tests/parallel`:
 
 ## Known gaps
 - D14 `skill-source` check not implemented (notes only; Iteration 9).
-- VC-016 `Merge iteration` -> `VC-014` half (Iteration 6); VC-008..015 checks absent (Iterations 5-6); only NFR-001 is registered. VC-013 temp copy (Iteration 5) will be `check_run.py`'s only directory creation.
+- VC-016 `Merge iteration` -> `VC-014` half and VC-012/014/015 (Iteration 6) absent.
+- VC-008..011/013 are tested against synthetic transcripts/histories only; real-transcript field shapes (Agent `prompt`/`isolation` input) and real commit shapes are reconciled in Iteration 9.
+- VC-013 uses `sys.executable`, not a `python` on PATH (D-014).
 - Synthetic transcripts follow the spec's Transcript shape, not a real sample (Iteration 9 reconciles).
 - `fixture/tinyshop-spec.md` not yet reviewed (VC-023, Iteration 9); it must not change after the hash is recorded.
-- Spec/plan text for VC-019 still says "3 iterations"; implementation uses 5 (D-007).
+- Spec/plan text for VC-019 and Iteration 5 still say "3 iterations"; implementation uses 5 (D-007, D-013).
 - `setup.sh` does not check that the skills repo contains `write-spec-plan`/`implement-spec-plan`.

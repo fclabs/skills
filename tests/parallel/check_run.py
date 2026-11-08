@@ -19,8 +19,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -105,6 +108,291 @@ def check_nfr001(ctx: Context, f: Findings) -> None:
     limit = max_agents(ctx.scenario)
     if n > limit:
         f.add("NFR-001", f"{n} orchestrator-level Agent calls exceed the maximum {limit} for scenario {ctx.scenario}")
+
+
+# --------------------------------------------------------------------------
+# git history helpers (S2): Commit -> iteration, Member Agent calls
+# --------------------------------------------------------------------------
+
+RECORD_RE = re.compile(r"(?:^|/)iterations/(\d+)-[^/]+\.md$")
+MERGE_RE = re.compile(r"^Merge iteration (\d+): ")
+RECONCILE_RE = re.compile(r"^Reconcile artifacts for iterations (\d+)[–-](\d+)")
+SUBJECT_ITER_RE = re.compile(r"\bIteration (\d+)\b", re.I)
+ARTIFACT_FILES = ("CONTEXT.md", "DECISIONS.md")
+
+
+@dataclass
+class Commit:
+    sha: str
+    parents: list[str]
+    subject: str
+
+
+def first_parent_commits(repo: Path) -> list[Commit]:
+    """main's first-parent history, oldest first."""
+    out = git(repo, "log", "--first-parent", "--reverse", "--format=%H%x1f%P%x1f%s", "main")
+    commits = []
+    for line in out.splitlines():
+        sha, parents, subject = line.split("\x1f", 2)
+        commits.append(Commit(sha, parents.split(), subject))
+    return commits
+
+
+def commit_iteration(repo: Path, c: Commit) -> int | None:
+    """Commit -> iteration rule: the iteration whose iterations/NN-*.md the commit
+    adds (for a merge, what its second parent's branch adds); else the
+    `Iteration N` in the subject; else None."""
+    if len(c.parents) >= 2:
+        out = git(repo, "log", "--diff-filter=A", "--name-only", "--format=",
+                  f"{c.parents[0]}..{c.parents[1]}")
+    else:
+        out = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root",
+                  "--diff-filter=A", c.sha)
+    ns = sorted({int(m.group(1)) for p in out.splitlines() if (m := RECORD_RE.search(p))})
+    if ns:
+        return ns[0]
+    m = SUBJECT_ITER_RE.search(c.subject)
+    return int(m.group(1)) if m else None
+
+
+def plan_groups(plan: Plan) -> dict[str, list[int]]:
+    """group value -> member iteration numbers, ascending (table cells, per the Parsing rules)."""
+    groups: dict[str, list[int]] = {}
+    for it in sorted(plan.iterations, key=lambda i: i.n):
+        if it.group is not None:
+            groups.setdefault(it.group, []).append(it.n)
+    return groups
+
+
+def _norm(s: str) -> str:
+    return " ".join(s.split())
+
+
+def attribute_agent_calls(plan: Plan, calls: list[hlib.ToolUse]) -> dict[int, list[hlib.ToolUse]]:
+    """Member Agent calls rule: a call belongs to the iteration whose Goal sentence it
+    quotes verbatim (earliest in the prompt wins), else to the iteration whose
+    `Iteration N: <name>` string occurs earliest; otherwise it is unattributed (dropped)."""
+    out: dict[int, list[hlib.ToolUse]] = {}
+    for call in calls:
+        prompt = _norm(str(call.input.get("prompt", "")))
+        best: tuple[int, int] | None = None
+        for it in plan.iterations:
+            if it.goal and _norm(it.goal) in prompt:
+                pos = prompt.index(_norm(it.goal))
+                if best is None or pos < best[0]:
+                    best = (pos, it.n)
+        if best is None:
+            for it in plan.iterations:
+                tag = f"Iteration {it.n}: {it.name}" if it.name else ""
+                if tag and tag in prompt:
+                    pos = prompt.index(tag)
+                    if best is None or pos < best[0]:
+                        best = (pos, it.n)
+        if best is not None:
+            out.setdefault(best[1], []).append(call)
+    return out
+
+
+def find_merge(repo: Path, fp: list[Commit], n: int) -> Commit | None:
+    """The merge commit of member n on main's first-parent line: subject
+    `Merge iteration N: ...`, else a merge commit that maps to n."""
+    for c in fp:
+        m = MERGE_RE.match(c.subject)
+        if m and int(m.group(1)) == n:
+            return c
+    for c in fp:
+        if len(c.parents) >= 2 and commit_iteration(repo, c) == n:
+            return c
+    return None
+
+
+def branch_base(repo: Path, merge: Commit, main_fp: set[str]) -> str | None:
+    """Walk the merge's second-parent chain back to the commit whose parent lies on
+    main's first-parent history; return that parent (the fork point)."""
+    c = merge.parents[1]
+    for _ in range(1000):
+        if c in main_fp:
+            return c
+        parents = git(repo, "rev-list", "--parents", "-n", "1", c).split()[1:]
+        if not parents:
+            return None
+        if parents[0] in main_fp:
+            return parents[0]
+        c = parents[0]
+    return None
+
+
+# --------------------------------------------------------------------------
+# S2 checks: VC-008 .. VC-011, VC-013
+# --------------------------------------------------------------------------
+
+@check("VC-008", ("full",))
+def check_vc008(ctx: Context, f: Findings) -> None:
+    """Each group: members' Agent calls in one assistant message, all isolation
+    "worktree", and the members' branches share one fork point."""
+    groups = plan_groups(ctx.plan)
+    if not groups:
+        return
+    attributed = attribute_agent_calls(ctx.plan, hlib.agent_calls(ctx.tr.events))
+    fp = first_parent_commits(ctx.repo)
+    main_fp = {c.sha for c in fp}
+    for g, ns in groups.items():
+        calls: list[hlib.ToolUse] = []
+        for n in ns:
+            mine = attributed.get(n, [])
+            if not mine:
+                f.add("VC-008", f"group {g}: no Agent call attributed to iteration {n}")
+            calls += mine
+            for c in mine:
+                if c.input.get("isolation") != "worktree":
+                    f.add("VC-008", f"group {g}: Agent call for iteration {n} lacks isolation \"worktree\"")
+        msgs = {c.msg_index for c in calls}
+        if len(msgs) > 1:
+            f.add("VC-008", f"group {g}: member Agent calls span {len(msgs)} assistant messages, expected 1")
+        bases: dict[int, str | None] = {}
+        for n in ns:
+            merge = find_merge(ctx.repo, fp, n)
+            if merge is None or len(merge.parents) < 2:
+                f.notes.append(f"group {g}: no merge commit for iteration {n}; fork point not checked")
+                continue
+            bases[n] = branch_base(ctx.repo, merge, main_fp)
+        if len(set(bases.values())) > 1:
+            f.add("VC-008", f"group {g}: member branches do not share one fork point: "
+                  + ", ".join(f"{n}={(b or 'none')[:10]}" for n, b in sorted(bases.items())))
+
+
+@check("VC-009", ("full",))
+def check_vc009(ctx: Context, f: Findings) -> None:
+    """Per group: ascending `Merge iteration N:` commits, then exactly one Reconcile
+    commit touching CONTEXT.md, then only later-iteration commits; one worktree left."""
+    fp = first_parent_commits(ctx.repo)
+    for g, ns in plan_groups(ctx.plan).items():
+        lo, hi = ns[0], ns[-1]
+        idx: dict[int, int] = {}
+        for n in ns:
+            for i, c in enumerate(fp):
+                m = MERGE_RE.match(c.subject)
+                if m and int(m.group(1)) == n:
+                    idx[n] = i
+                    break
+        missing = [n for n in ns if n not in idx]
+        if missing:
+            f.add("VC-009", f"group {g}: no `Merge iteration N:` commit for iteration(s) "
+                  + ", ".join(map(str, missing)))
+            continue
+        recs = [i for i, c in enumerate(fp)
+                if (m := RECONCILE_RE.match(c.subject)) and (int(m.group(1)), int(m.group(2))) == (lo, hi)]
+        if len(recs) != 1:
+            f.add("VC-009", f"group {g}: {len(recs)} `Reconcile artifacts for iterations {lo}-{hi}` commits, expected 1")
+            continue
+        i0 = idx[lo]
+        if [idx[n] for n in ns] + [recs[0]] != list(range(i0, i0 + len(ns) + 1)):
+            f.add("VC-009", f"group {g}: merges in ascending order directly followed by the Reconcile "
+                  "commit expected; found a different order or an extra commit in between")
+        rec = fp[recs[0]]
+        paths = git(ctx.repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", rec.sha).split()
+        if not any(p.rsplit("/", 1)[-1] == "CONTEXT.md" for p in paths):
+            f.add("VC-009", f"group {g}: the Reconcile commit does not modify CONTEXT.md")
+        for c in fp[recs[0] + 1:]:
+            n = commit_iteration(ctx.repo, c)
+            if n is None or n <= hi:
+                f.add("VC-009", f"group {g}: commit after the Reconcile ({c.subject!r}) belongs to "
+                      + ("no iteration" if n is None else f"iteration {n}, not a later one"))
+                break
+    wt = [ln for ln in git(ctx.repo, "worktree", "list", "--porcelain").splitlines() if ln.startswith("worktree ")]
+    if len(wt) != 1:
+        f.add("VC-009", f"git worktree list shows {len(wt)} worktrees, expected only the main one")
+
+
+@check("VC-010", ("full",))
+def check_vc010(ctx: Context, f: Findings) -> None:
+    """Member branches stay inside Touches plus their own record, never touch CONTEXT.md
+    or DECISIONS.md; main's iterations/ holds one record per iteration."""
+    fp = first_parent_commits(ctx.repo)
+    for g, ns in plan_groups(ctx.plan).items():
+        for n in ns:
+            merge = find_merge(ctx.repo, fp, n)
+            if merge is None or len(merge.parents) < 2:
+                continue            # absence is VC-009's finding
+            out = git(ctx.repo, "log", "--name-only", "--format=", f"{merge.parents[0]}..{merge.parents[1]}")
+            touches = ctx.plan.by_n(n).touches
+            own = re.compile(rf"(?:^|/)iterations/0*{n}-[^/]+\.md$")
+            for p in sorted({ln for ln in out.splitlines() if ln}):
+                if p.rsplit("/", 1)[-1] in ARTIFACT_FILES:
+                    f.add("VC-010", f"iteration {n}: member branch changes {p}")
+                elif not own.search(p) and not any(hlib.paths_overlap(p, t) for t in touches):
+                    f.add("VC-010", f"iteration {n}: member branch changes {p}, outside its Touches")
+    names = git(ctx.repo, "ls-tree", "-r", "--name-only", "main").splitlines()
+    counts: dict[int, int] = {}
+    for p in names:
+        if m := RECORD_RE.search(p):
+            counts[int(m.group(1))] = counts.get(int(m.group(1)), 0) + 1
+    for it in ctx.plan.iterations:
+        if counts.get(it.n, 0) != 1:
+            f.add("VC-010", f"main holds {counts.get(it.n, 0)} iterations/{it.n:02d}-*.md records, expected 1")
+
+
+@check("VC-011", ("full",))
+def check_vc011(ctx: Context, f: Findings) -> None:
+    """DECISIONS.md on main: no `D-?`, ids D-001..D-k gap-free, (Iteration N) non-decreasing."""
+    paths = [p for p in git(ctx.repo, "ls-tree", "-r", "--name-only", "main").splitlines()
+             if p.rsplit("/", 1)[-1] == "DECISIONS.md"]
+    if not paths:
+        f.add("VC-011", "no DECISIONS.md on main")
+        return
+    for p in paths:
+        text = git(ctx.repo, "show", f"main:{p}")
+        if "D-?" in text:
+            f.add("VC-011", f"{p} contains the placeholder D-?")
+        heads = [ln for ln in text.splitlines() if re.match(r"#{1,6}\s+D-", ln)]
+        ids = [int(m.group(1)) for ln in heads if (m := re.match(r"#{1,6}\s+D-(\d+)", ln))]
+        if ids != list(range(1, len(ids) + 1)):
+            f.add("VC-011", f"{p}: decision ids {ids} are not D-001..D-{len(ids):03d} without gaps")
+        its = [int(m.group(1)) for ln in heads if (m := re.search(r"\(Iteration (\d+)\)", ln))]
+        if its != sorted(its):
+            f.add("VC-011", f"{p}: (Iteration N) values {its} are not non-decreasing")
+
+
+# VC-013 driver: runs inside the temporary copy with the copy as working directory.
+VC013_DRIVER = """
+import tomllib
+from tinyshop.pricing import price_cents
+from tinyshop.tax import tax_cents
+from tinyshop.discount import discount_cents
+assert price_cents([(250, 2)]) == 500, "price_cents([(250, 2)]) != 500"
+assert tax_cents(1000) == 80, "tax_cents(1000) != 80"
+assert discount_cents(1000) == 100, "discount_cents(1000) != 100"
+with open("tinyshop/rates.toml", "rb") as fh:
+    rates = tomllib.load(fh)
+assert rates.get("tax_bp") == 800, "rates.toml tax_bp != 800"
+assert rates.get("discount_bp") == 1000, "rates.toml discount_bp != 1000"
+"""
+
+
+@check("VC-013", ("full",))
+def check_vc013(ctx: Context, f: Findings) -> None:
+    """End to end on a copy of the working tree. The copy lives in a tempfile
+    directory outside the scratch repo (the only directory check_run.py creates)
+    and is removed in the finally block; nothing is written inside <repo>."""
+    tmp = tempfile.TemporaryDirectory(prefix="vc013-")
+    try:
+        work = Path(tmp.name) / "work"
+        shutil.copytree(ctx.repo, work, symlinks=True,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__", ".claude", "*.pyc"))
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        for label, cmd in (("python -m unittest discover", [sys.executable, "-m", "unittest", "discover"]),
+                           ("end-to-end driver", [sys.executable, "-c", VC013_DRIVER])):
+            try:
+                cp = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                f.add("VC-013", f"{label} timed out")
+                return
+            if cp.returncode != 0:
+                tail = (cp.stderr.strip().splitlines() or ["no output"])[-1]
+                f.add("VC-013", f"{label} exited {cp.returncode}: {tail}")
+                return
+    finally:
+        tmp.cleanup()
 
 
 # --------------------------------------------------------------------------

@@ -67,3 +67,27 @@ Ids are the plan's `D-NNN`; spec decisions are cited as `spec D5`.
 **Decision**: `--mark-failed` exits 0 after writing (the caller already decided the run failed); `--violation` accepts only `skipped|error` (argparse exit 2 otherwise); scenarios `plan|full|downgrade|failing-member`. `--summary` prints `summary S: N files, P passed` and `violations: <union|none>` before exiting, even for exit 2; files that do not have the BR-004 shape are exit 2. expect.json gained `append_result_out`, `result_file`, `output_contains`, `passed`, `scenario`, `run`; `Case` gained `build`.
 **Rejected**: Exit 1 for `--mark-failed` (would make run_scenario.sh treat it as a checker failure); a separate runner for non-result modes.
 **Consequences**: run.sh stays one runner for every case; later cases can combine the keys freely.
+
+## D-012: Commit->iteration, attribution and fork-point algorithms  (Iteration 5)
+**Context**: The spec's Parsing rules leave details open: several records in one commit, merge commits, prompts quoting several Goals, how to find a member's fork point.
+**Decision**: A commit maps to the lowest `iterations/NN-*.md` it adds (a merge: what `parents[0]..parents[1]` adds), else the `Iteration N` subject match, else none. An Agent call maps to the Goal (whitespace-normalised) that occurs earliest in its prompt, else the earliest `Iteration N: <name>`. A member's merge is the first-parent commit with subject `Merge iteration N: `, else a merge commit mapping to N. The fork point is found by walking the second-parent chain to the first commit whose parent is on main's first-parent line; all members must agree. A member without a merge commit is VC-009's finding (VC-008 only notes it, VC-010 skips it).
+**Rejected**: Failing VC-008/010 as well when merges are missing (one defect would fire three ids).
+**Consequences**: Each bad S2 case trips exactly one VC id.
+
+## D-013: S2 repo variants use 5 and 7 iterations, not 3  (Iteration 5)
+**Context**: The plan asks for 3-iteration S2 variants; D-007 shows a tinyshop plan cannot be valid (VC-004, VC-006) below 5 iterations, and the case plan must pass the plan rules.
+**Decision**: S2 cases use `base5()` and `base7()`; also a good case with no groups (checks that VC-008..010 are vacuous per group). Following D-007 (and the executor brief for this iteration) the reasoning is reused; the spec's VC-019 "3 iterations" and the S2 criterion stay unmet by design.
+**Rejected**: A 3-iteration repo with a non-conforming plan (would not model a real S2 run).
+**Consequences**: Later records must not claim a 3-iteration case.
+
+## D-014: VC-013 runs the harness interpreter in a tempfile copy  (Iteration 5)
+**Context**: The spec says `python -m unittest discover` on a copy; NFR-003 requires both `python` and `python3`.
+**Decision**: The copy skips `.git`, `__pycache__` and `.claude`, lives in a `tempfile.TemporaryDirectory` removed in a `finally`, and both the unittest run and the driver use `sys.executable` (the checker's own Python >= 3.11), with `PYTHONDONTWRITEBYTECODE=1`; the first failing step is one VC-013 violation. A `tinyshop` import error in the driver also yields VC-013.
+**Rejected**: `python` from PATH (adds an environment dependency to the checker).
+**Consequences**: A fixture needing `python` features beyond the checker's interpreter is not detected; live runs use `python` in the plans themselves.
+
+## D-015: S2 check scope and strictness details  (Iteration 5)
+**Context**: Spec text leaves edge cases open.
+**Decision**: VC-009 requires the merges to sit at consecutive first-parent positions followed immediately by the Reconcile commit (so out-of-order merges, a commit in between and a Reconcile for the wrong range all fail), a Reconcile touching any file named `CONTEXT.md`, and `git worktree list` with exactly one entry, checked once for the run. VC-010's "one record per iteration" means exactly one `iterations/NN-*.md` on main for each plan iteration (zero or two fail). VC-011 checks every `DECISIONS.md` on main, takes ids from headings only, and treats a missing file as a violation.
+**Rejected**: Accepting duplicate records; reading ids from the whole text (body cross-references would count).
+**Consequences**: Plans with no groups pass VC-008/009 vacuously; VC-010/011/013 still apply.
