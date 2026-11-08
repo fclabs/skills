@@ -6,9 +6,9 @@ Harness dir: /Users/fede/devel/fclabs/skills/tests/parallel/ (paths below are re
 Plan decision ids are `D-NNN`; spec decisions are written `spec D5`.
 
 ## Current state
-- Done: Iteration 1 (fixtures), group A (Iteration 2 `setup.sh`, Iteration 3 `hlib.py` + `check_plan.py` + plan golden cases), reconciled; Iteration 4 (`check_run.py` core); Iteration 5 (git-history checks VC-008..011, VC-013); Iteration 6 (transcript-text checks VC-012 notes, VC-014, VC-015; `check_run.py` is now feature-complete except D14).
-- `bash selftest/run.sh` passes 126/126 cases (30 plan + 25 run + 7 summary + 7 mark + 30 S2 + 17 S3 + 10 S4; ~32 s); `bash selftest/vc_setup.sh` prints VC-001/VC-002 PASS.
-- No `run_scenario.sh`, `accept.sh` or README yet. Next: Iteration 7 (`run_scenario.sh`).
+- Done: Iteration 1 (fixtures), group A (Iteration 2 `setup.sh`, Iteration 3 `hlib.py` + `check_plan.py` + plan golden cases), reconciled; Iteration 4 (`check_run.py` core); Iteration 5 (git-history checks VC-008..011, VC-013); Iteration 6 (transcript-text checks VC-012 notes, VC-014, VC-015; `check_run.py` is feature-complete except D14); Iteration 7 (`run_scenario.sh` + `selftest/vc_runscenario.sh`).
+- `bash selftest/run.sh` passes 126/126 cases (30 plan + 25 run + 7 summary + 7 mark + 30 S2 + 17 S3 + 10 S4; ~32 s); `bash selftest/vc_setup.sh` prints VC-001/VC-002 PASS; `bash selftest/vc_runscenario.sh` (stub-driven, ~65 checks, ~25 s) ends `all checks passed (VC-018 PASS)`.
+- No `accept.sh` or README yet. Next: Iteration 8 (`accept.sh`, `selftest/vc_static.sh`, README). `run_scenario.sh` has only ever run against stubs; the real `claude` is first invoked in Iteration 9.
 - `fixture/tinyshop-spec.md` has not been run through `/review-spec` (Iteration 9).
 
 Registered checks in `check_run.py` (`CHECKS`, in this order):
@@ -44,8 +44,10 @@ Not covered yet: `skill-source` (D14) and the real-sample case (Iteration 9). VC
 - `check_plan.py`: S1 checker, VC-003..007 and VC-025.
 - `check_run.py`: S2-S4 checker (registry, NFR-001, VC-008..015), `--summary`, `--mark-failed`; its only directory creation is the VC-013 `tempfile` copy.
 - `selftest/make_cases.py`: builds golden cases `<outdir>/<case>/{plan.md,expect.json,...}`; one `case_<name>()` function per case returning `Case(files, expect, build=None)`; also the transcript and repo builders (including the S2 builders below).
+- `run_scenario.sh`: `run_scenario.sh <scenario> <k> [--force]` (headless run, checker call, exit mapping, plan commit; see Public interfaces).
+- `selftest/vc_runscenario.sh`: stub-driven VC-018 / VC-017 run_scenario half / VC-021 constants; prints `PASS|FAIL <name>` lines.
 - `selftest/run.sh`: builds cases in a temp dir, runs each, asserts exit code, exact violation set, result-file shape, stdout names ids, plus the optional expect.json keys below; exit 0 only if all pass. A case whose checker file is missing FAILS.
-- Artifact dir (`specs/01-parallel-skills-test-plan-artifacts/`): `CONTEXT.md`, `DECISIONS.md`, `iterations/01..06`.
+- Artifact dir (`specs/01-parallel-skills-test-plan-artifacts/`): `CONTEXT.md`, `DECISIONS.md`, `iterations/01..07`.
 
 ## Public interfaces
 `setup.sh <dir>`:
@@ -94,6 +96,18 @@ Messages (stderr, prefix `check_run.py: error: `): `transcript not found: <path>
 S3/S4 builders (Iteration 6): `s3_its()` (4 iterations, group A on 2-3 both touching pyproject.toml), `s4_its()` (`base5` with group B on 2-4), `s3_transcript(its, *, announce=ANNOUNCE, announce_at="before"|"same-message"|"after-first-call", calls="separate"|"one-message"|"overlap", isolation_on, prompt_style="goal"|"none", decoy_texts, final_text, extra, sub_agents, tool_name, denials, model, result)`, `_s3_case(exit, violations, *, tr, merge, reorder, extra, scenario, transcript, dirty, no_plan)` (sequential `build_s2_repo` history; `merge` adds a `--no-ff` merge via `_add_merge`; `reorder` commits iteration 3 before 2), `_s4_case(exit, violations, *, tr, merge, branches=("member-3","member-4"), extra, run)` (`build_repo` + unmerged branches via `_add_branches`; transcript is `s2_transcript(..., final_text=S4_FINAL, upto=4)`), constants `ANNOUNCE`, `S4_FINAL`; `It.scope_extra` adds a Scope bullet (used for doc paths, `_docs_its`); `s2_transcript(..., upto=n)` stops after iteration/group n. Downgrade/failing-member NFR-001 and result-note cases now run on these valid S3/S4 runs (`run-*` cases that used `build_transcript(agents=...)` for those scenarios were rebuilt).
 S2 builders: `build_s2_repo(path, its, plan_text, *, defect=None, sep="–", decisions=None, final_files=None)` (real git history for plan `its`: "Add plan", `Iteration N: name` commits, member branches + `--no-ff` merges + Reconcile; final iteration writes tinyshop stubs; defects: diverged-base, merge-order, extra-commit, no-reconcile-context, no-reconcile, worktree-left, late-unmapped, member-context, member-outside, missing-record); `s2_transcript(its, *, extra, extra_per_message, sub_agents, prompt_style="goal"|"name", split_group, no_isolation, skip_members, final_text)` (one Agent call per iteration, group calls in one message; `extra` adds unattributed calls); `_s2_case(its, exit, violations, repo=, tr=, extra=)` (use a fresh `base7()`/`base5()`); constants `ART`, `FINAL_STUBS`, `SMOKE_TEST`. `full` NFR-001 cases now use `_s2_case` (7 plan calls + `extra`).
 
+`run_scenario.sh <scenario> <k> [--force]` (Iteration 7), scenario in `plan|full|downgrade|failing-member|smoke`, k a positive integer:
+- Constants, the first non-comment lines (exact `^NAME=` lines): `TIMEOUT_S=1800`, `BUDGET_USD=10`, `MODEL=claude-sonnet-5-5`, `ALLOWED_TOOLS="Skill SendMessage Agent Read Write Edit Glob Grep Bash(git:*) Bash(python:*) Bash(python3:*) Bash(mkdir:*) Bash(ls:*) Bash(cat:*) Bash(cp:*) Bash(mv:*) Bash(rm:*) Bash(touch:*)"`. They are the only copies; changing the model is a one-line edit.
+- Env: `WORK` (default `$HOME/.cache/parallel-skills-test`, made absolute with `pwd -P`), `CLAUDE_BIN` (default `claude`; must resolve via `command -v`), `CHECK_PLAN` / `CHECK_RUN` (executables called directly; default `python3 check_plan.py` / `python3 check_run.py` next to the script), `PROMPT_FORM=slash|skill` (default `slash`; `skill` = "Use the <skill> skill on <path>"; anything else exits 2). `--mark-failed` always uses the real `check_run.py`. The script exports `PYTHONDONTWRITEBYTECODE=1` and `GIT_OPTIONAL_LOCKS=0`.
+- Layout under `WORK`: scratch repo `plan-<k>/` (scenarios `plan` and `full`), `downgrade-<k>/`, `failing-member-<k>/`, `smoke-<k>/`; `results/<scenario>-<k>.json` (smoke writes none); `transcripts/<dirname>-<scenario>.jsonl` (`plan-1-plan.jsonl`, `plan-1-full.jsonl`, `downgrade-1-downgrade.jsonl`, `smoke-1-smoke.jsonl`). stderr of `claude` is not captured.
+- Flow: validate args (usage -> 2) -> `command -v` claude and `timeout` (-> 2) -> re-run rules (-> 2) -> `setup.sh` (failure -> 2) -> headless run in the scratch dir: `timeout $TIMEOUT_S $CLAUDE_BIN -p <prompt> --output-format stream-json --verbose --model $MODEL --permission-mode acceptEdits --allowedTools "$ALLOWED_TOOLS" --max-budget-usd $BUDGET_USD > transcript` -> checker. `git status --porcelain` of the skills repository (two levels above the script) is compared before/after the run.
+- Exit: 0 once a result is written (any verdict; smoke: transcript written); 1 only for `smoke` when claude/timeout exits non-zero or the skills repo changed; 2 usage/refusal.
+- Mapping: claude non-zero (or skills repo changed) -> `check_run.py --mark-failed --scenario S --run K --result-out results/S-K.json --violation error`, checker NOT called, exit 0. Checker (`check_plan.py <dir>/specs/tinyshop-plan.md --run K --transcript T --result-out F` for `plan`; `check_run.py <dir> <plan> --transcript T --run K --scenario S --result-out F` otherwise, plan = `<dir>/specs/tinyshop-plan.md`, `bad-group-plan.md`, `failing-member-plan.md`) exit 0/1 -> its result is kept (if the file is missing -> error); other exit -> error. After `plan` with checker exit 0: `git add specs`, `git commit -m "Add plan"` in the scratch repo; commit failure or non-empty `git status --porcelain` -> `plan-K.json` rewritten as error.
+- `full K`: refuses (2, message names `plan K --force`) if `results/full-K.json` exists, with or without `--force` (`--force` on a fresh `full` also exits 2); otherwise runs in `plan-K/` only if it exists and `results/plan-K.json` has `passed: true`, else writes `skipped` (`--mark-failed` default), does not invoke claude, exits 0.
+- Re-runs: for `plan|downgrade|failing-member|smoke` an existing `$WORK/<dir>` exits 2 unless `--force`, which deletes the dir, `results/<scenario>-K.json` and the transcript; `plan K --force` also deletes `results/full-K.json` and `transcripts/plan-K-{plan,full}.jsonl`.
+- Prompts (single line each; one shared tail `The spec is already READY; do not run /review-spec.`): plan `/write-spec-plan <dir>/specs/tinyshop-spec.md <READY> Write the plan to <dir>/specs/tinyshop-plan.md. Work non-interactively.`; full `/implement-spec-plan <dir>/specs/tinyshop-plan.md <READY> Skip the final /verify-spec step. Work non-interactively.`; downgrade / smoke the same on `<dir>/bad-group-plan.md` / `<dir>/smoke-group-plan.md`; failing-member the same on `failing-member-plan.md` plus `If a member's blocker is not fixed after one retry, stop and report; do not re-run the group sequentially.` before `Work non-interactively.`
+- Stub conventions (documented in the `selftest/vc_runscenario.sh` header): claude stub reads `STUB_LOG` (writes `.argv` one arg per line, `.env`, `.pwd`), `STUB_MODE=ok|crash`, `STUB_WRITE_PLAN`, `STUB_STRAY`, `STUB_TOUCH`; checker stub reads `STUB_CHK_LOG`, `STUB_CHK_RC` (0/1 write a result file; 3 does not), `STUB_CHK_NOFILE`. NFR-002 is tested on a copy of the harness inside a throw-away git repo (the script derives the skills repo from its own location).
+
 Fixture template conventions (parsers must accept):
 - Placeholder `@DIR@` = absolute scratch dir, no trailing slash. Plans are `@DIR@/<name>-plan.md` (`bad-group`, `failing-member`, `smoke-group`); spec `@DIR@/specs/tinyshop-spec.md`; artifact dir `@DIR@/<name>-plan-artifacts/`.
 - Group letters: `A` bad, `B` failing member, `C` smoke.
@@ -110,6 +124,7 @@ Fixture template conventions (parsers must accept):
 - Add a golden case: write `case_<name>()` in `selftest/make_cases.py`.
 - Known-good plan golden cases and S2 history cases use 5 and 7 iterations (D-007, D-013).
 - `check_run.py` never writes in `<repo>`; it writes only `--result-out`. Notes accumulate in `Findings.notes` and are printed as `note:` lines (the `subagents: N` note is printed on its own line instead).
+- Tests must point `WORK` at a temp dir and use stubs; nothing in selftest invokes the real `claude` or writes to the skills repo or `$HOME/.cache`.
 - Subagent shells may refuse compound `&&` commands or ones mentioning git env vars; run `bash selftest/run.sh` plainly.
 - Parallel-group worktrees start from the commit at dispatch; members may need `git merge --ff-only` to the latest main to see earlier fixtures.
 
@@ -117,12 +132,16 @@ Fixture template conventions (parsers must accept):
 From `/Users/fede/devel/fclabs/skills/tests/parallel`:
 - `bash selftest/run.sh` — all golden cases.
 - `bash selftest/vc_setup.sh` — VC-001/VC-002 (needs `$TMPDIR` outside any git repo).
+- `bash selftest/vc_runscenario.sh` — VC-018 and the run_scenario half of VC-017 with stubs (needs `timeout` on PATH).
+- `bash run_scenario.sh plan 1` / `full 1` / `downgrade 1` / `failing-member 1` / `smoke 1` [`--force`] — live runs (Iteration 9/10 only; spend money).
 - `python3 check_plan.py plan.md --run 1 [--transcript t.jsonl] [--result-out r.json]`
 - `python3 check_run.py <repo> plan.md --transcript t.jsonl --run 1 --scenario downgrade [--result-out r.json]`; `python3 check_run.py --summary <dir> --scenario full`; `python3 check_run.py --mark-failed --scenario full --run 2 --result-out r.json [--violation error]`
 - `python3 selftest/make_cases.py <outdir>`
 - `grep -c '^## Iteration ' fixture/*.tmpl` → 4, 5, 4.
 
 ## Known gaps
+- `run_scenario.sh` has never driven a real `claude`: stream-json, the `/skill args` prompt form (`PROMPT_FORM` default `slash`; flip to `skill` in Iteration 9 if VC-022 shows it is unresolved), and any needed `ALLOWED_TOOLS` addition are unverified. If the allowlist changes, `run_scenario.sh`, the README and `vc_runscenario.sh` (which reads it from the script) move together.
+- The skills-repo-unchanged check (NFR-002) compares `git status --porcelain` before/after, so edits made to the skills repo while a run is in progress make the run `error`.
 - D14 `skill-source` check not implemented (notes only; Iteration 9); no real-sample case yet.
 - VC-012/014/015 match synthetic text and tool_use shapes only; real `Agent` inputs (`isolation`, `prompt`), real `tool_result` placement and branch names in S4 are reconciled in Iteration 9.
 - VC-014 attribution depends on member prompts quoting the Goal; a real executor that paraphrases would read as `no Agent call is attributable` (see D-016).

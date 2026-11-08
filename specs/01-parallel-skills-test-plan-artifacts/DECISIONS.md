@@ -115,3 +115,33 @@ Ids are the plan's `D-NNN`; spec decisions are cited as `spec D5`.
 **Decision**: Cases whose expectation is "exit 0" or "only NFR-001" for those scenarios (`run-nfr001-downgrade/failing-member-*`, `run-good-result-*`, `run-note-no-result-event`, `run-missing-plan-in-repo-ok-for-downgrade`, subagent-not-counted-other) now use `_s3_case` / `_s4_case` with `extra` unattributed Agent calls; expectations and ids are unchanged. Usage-error cases (exit 2) stay as they were.
 **Rejected**: Letting those cases expect VC-014/VC-015 as well (muddies the one-id rule); restricting registration (VC-014/015 must run in their scenarios).
 **Consequences**: New downgrade/failing-member cases must start from `_s3_case`/`_s4_case`.
+
+## D-020: run_scenario.sh directory, transcript and argument conventions  (Iteration 7)
+**Context**: The spec fixes `$WORK/plan-<k>`, `downgrade-<k>`, `failing-member-<k>`, `smoke-1` and `transcripts/<dir>-<scenario>.jsonl`, but not the dir for `full`, the smoke `k`, or setup failures.
+**Decision**: `plan` and `full` share `plan-<k>`; smoke uses `smoke-<k>` (README documents `smoke 1`); transcripts are `<dirname>-<scenario>.jsonl`. Argument validation (scenario, positive integer k, only `--force`) precedes any file creation; `setup.sh` failure and a missing `claude`/`timeout` exit 2. `claude` stderr is not captured. Stdout of the checker passes through.
+**Rejected**: Restricting smoke to k=1 (extra rule with no benefit); capturing stderr into a file (not in the spec).
+**Consequences**: Iteration 8/9 README text may rely on these names.
+
+## D-021: Checker overrides are executables; a result file is mandatory after exit 0/1  (Iteration 7)
+**Context**: `CHECK_PLAN`/`CHECK_RUN` must be injectable (VC-018); the spec says checker exit 0/1 means the checker wrote the result.
+**Decision**: Overrides are run directly (stubs are executable scripts); defaults are `python3 <script dir>/check_*.py`. If a checker exits 0/1 but the result file is missing, the run is marked `error` (D10 spirit). `--mark-failed` always runs the real `check_run.py`. The plan-commit step also runs only when the plan checker exited 0 (a failing S1 is never committed).
+**Rejected**: Treating a missing file after exit 0/1 as success (would leave `--summary` short of files silently).
+**Consequences**: A checker that forgets `--result-out` is caught at run time.
+
+## D-022: NFR-002 snapshot and smoke failure semantics  (Iteration 7)
+**Context**: The plan asks to fail (`error`) when the skills repo `git status --porcelain` changes during a live run; smoke has no result file.
+**Decision**: The status is taken immediately before and after the headless run; a difference counts like a crash (mark `error`, checker not called; for smoke exit 1). The repo is located from the script's own location, so the test copies the harness into a throw-away git repo to prove it without touching the real skills repo.
+**Rejected**: A `SKILLS_REPO` env override (extra interface not in the spec).
+**Consequences**: The stub test for this clause relies on the copy listing in `vc_runscenario.sh` (run_scenario.sh, setup.sh, check_run.py, hlib.py, fixture/); a new dependency of `run_scenario.sh` must be added there.
+
+## D-023: Prompt wording and PROMPT_FORM  (Iteration 7)
+**Context**: The spec lists required clauses only; headless sessions must not wait for answers.
+**Decision**: Prompts are one line: the invocation (`/skill <path>` or, with `PROMPT_FORM=skill`, `Use the <skill> skill on <path>.`), `The spec is already READY; do not run /review-spec.`, then (S2-S4, smoke) `Skip the final /verify-spec step.`, for S4 the D3 sentence verbatim with a capital I, and `Work non-interactively.`; the plan prompt names `<dir>/specs/tinyshop-plan.md` as destination. The plan prompt never mentions `/verify-spec`.
+**Rejected**: Multi-line prompts (argv logging and grepping stay line-based).
+**Consequences**: The README (Iteration 8) must quote these strings from `run_scenario.sh`; Iteration 9 may adjust wording if the real session misreads them (tests assert clauses, not full text, except the PROMPT_FORM=skill smoke line).
+
+## D-024: full never takes --force, even when fresh  (Iteration 7)
+**Context**: Spec D13: a repeat `full K` exits 2 naming `plan K --force`; `full` "never takes `--force`".
+**Decision**: `full K` with an existing result exits 2 (message names `plan K --force`); `full K --force` on a fresh state also exits 2 with the same hint. Order: existing-result refusal first, then the force refusal, then the D8 skip logic.
+**Rejected**: Silently ignoring `--force` for a fresh `full`.
+**Consequences**: The only way to repeat S2 run K is `plan K --force`, which also repeats S1.
