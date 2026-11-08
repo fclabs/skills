@@ -440,3 +440,147 @@ def init_model(events: list[dict]) -> str:
     if not isinstance(model, str) or not model:
         raise HarnessError("init event carries no model")
     return model
+
+
+# --------------------------------------------------------------------------
+# transcript helpers (orchestrator level; Iteration 4)
+# --------------------------------------------------------------------------
+# A "message" is the set of orchestrator assistant events sharing one
+# message.id (stream-json emits one event per content block).  `msg_index` is
+# the ordinal of the message by first appearance; `event_index` is the index in
+# the full event list, so tool_use and tool_result positions are comparable.
+
+AGENT_TOOL_NAMES = ("Agent", "Task")
+
+
+@dataclass
+class ToolUse:
+    event_index: int
+    msg_id: str
+    msg_index: int
+    id: str
+    name: str
+    input: dict
+
+
+@dataclass
+class TextBlock:
+    event_index: int
+    msg_id: str
+    msg_index: int
+    text: str
+
+
+@dataclass
+class ToolResult:
+    event_index: int
+    tool_use_id: str
+    content: object
+    is_error: bool
+
+
+@dataclass
+class Transcript:
+    events: list[dict]
+    init: dict
+    model: str
+    result: dict | None
+
+
+def _blocks(ev: dict) -> list[dict]:
+    msg = ev.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return [b for b in content if isinstance(b, dict)]
+    return []
+
+
+def assistant_blocks(events: list[dict]) -> list[tuple[int, str, int, dict]]:
+    """(event_index, msg_id, msg_index, block) for orchestrator assistant content blocks."""
+    out: list[tuple[int, str, int, dict]] = []
+    order: dict[str, int] = {}
+    for i, ev in enumerate(events):
+        if ev.get("type") != "assistant" or ev.get("parent_tool_use_id") is not None:
+            continue
+        msg = ev.get("message")
+        mid = msg.get("id") if isinstance(msg, dict) else None
+        if not isinstance(mid, str) or not mid:
+            mid = f"_event{i}"
+        idx = order.setdefault(mid, len(order))
+        for b in _blocks(ev):
+            out.append((i, mid, idx, b))
+    return out
+
+
+def tool_uses(events: list[dict], names: tuple[str, ...] | None = None) -> list[ToolUse]:
+    """Orchestrator-level tool_use blocks, optionally filtered by tool name."""
+    out = []
+    for i, mid, idx, b in assistant_blocks(events):
+        if b.get("type") == "tool_use" and (names is None or b.get("name") in names):
+            inp = b.get("input")
+            out.append(ToolUse(i, mid, idx, str(b.get("id", "")), str(b.get("name", "")),
+                               inp if isinstance(inp, dict) else {}))
+    return out
+
+
+def agent_calls(events: list[dict]) -> list[ToolUse]:
+    """Orchestrator-level Agent/Task calls (subagent-emitted calls excluded)."""
+    return tool_uses(events, AGENT_TOOL_NAMES)
+
+
+def group_by_message(uses: list[ToolUse]) -> dict[int, list[ToolUse]]:
+    """Group tool uses by assistant message ordinal (the spec's 'single assistant message')."""
+    out: dict[int, list[ToolUse]] = {}
+    for u in uses:
+        out.setdefault(u.msg_index, []).append(u)
+    return out
+
+
+def text_blocks(events: list[dict]) -> list[TextBlock]:
+    """Orchestrator assistant text blocks in transcript order."""
+    return [TextBlock(i, mid, idx, str(b.get("text", "")))
+            for i, mid, idx, b in assistant_blocks(events) if b.get("type") == "text"]
+
+
+def tool_results(events: list[dict]) -> dict[str, ToolResult]:
+    """Orchestrator-level tool_result blocks keyed by tool_use_id."""
+    out: dict[str, ToolResult] = {}
+    for i, ev in enumerate(events):
+        if ev.get("type") != "user" or ev.get("parent_tool_use_id") is not None:
+            continue
+        for b in _blocks(ev):
+            if b.get("type") == "tool_result" and isinstance(b.get("tool_use_id"), str):
+                out[b["tool_use_id"]] = ToolResult(i, b["tool_use_id"], b.get("content"),
+                                                   bool(b.get("is_error")))
+    return out
+
+
+def result_event(events: list[dict]) -> dict | None:
+    """The last `result` event, or None."""
+    found = None
+    for e in events:
+        if e.get("type") == "result":
+            found = e
+    return found
+
+
+def permission_denials(events: list[dict]) -> list:
+    r = result_event(events)
+    d = r.get("permission_denials") if r else None
+    return d if isinstance(d, list) else []
+
+
+def load_transcript(path: str | Path) -> Transcript:
+    """Read and shape-check a stream-json transcript (spec 'Transcript').
+
+    HarnessError (exit 2) when missing, unparseable, without an init event with
+    a model id, or without orchestrator-level assistant events.
+    """
+    events = read_stream(path)
+    init = init_event(events)
+    model = init_model(events)
+    if not assistant_blocks(events):
+        raise HarnessError(f"transcript has no assistant events: {path}")
+    return Transcript(events, init, model, result_event(events))

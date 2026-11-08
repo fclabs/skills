@@ -6,8 +6,16 @@ inputs the checker needs (plan.md, and for later iterations repo/ and
 transcript.jsonl).  expect.json:
   {"checker": "check_plan.py"|"check_run.py", "args": [...], "exit": 0|1|2,
    "violations": [...]}                       # exact set of violation ids
-optional keys: "model" (expected result-file model), "notes_contain" ([str]).
+optional keys: "model", "scenario", "run" (expected result-file fields),
+"notes_contain" ([str], exact note strings), "passed" (default: exit == 0),
+"output_contains" ([str], substrings of stdout+stderr, checked before the
+exit-2 early return), "append_result_out" (default true; false for modes whose
+args carry --result-out themselves or take none), "result_file" (result file
+to validate, default result.json; when append_result_out is false and no
+result_file is given, only the violation ids are looked for in stdout).
 `args` run with the case directory as cwd; run.sh appends --result-out.
+A Case may carry `build(casedir)`, called after its files are written (used
+to create synthetic git repos).
 
 HOW TO ADD A CASE: write one function `case_<name>()` returning a Case(files,
 expect).  The case directory name is <name> with underscores turned into
@@ -17,17 +25,23 @@ token @DIR@ in any file text becomes the case directory's absolute path.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 CHECK_PLAN = "check_plan.py"
+CHECK_RUN = "check_run.py"
+TEST_MODEL = "claude-test-model"
 
 
 @dataclass
 class Case:
     files: dict[str, str]
     expect: dict
+    build: Callable[[Path], None] | None = None
 
 
 # ---------------------------------------------------------------- plan builder
@@ -351,6 +365,356 @@ def case_plan_usage_missing_run() -> Case:
     return _plan_case(render(base7()), 2, [], args=["plan.md"])
 
 
+# ------------------------------------------------- transcript and repo builders
+
+def ev_init(model: str = TEST_MODEL) -> dict:
+    return {"type": "system", "subtype": "init", "model": model, "skills": [], "plugins": []}
+
+
+def ev_assistant(mid: str, block: dict, parent: str | None = None) -> dict:
+    """One stream-json assistant event carrying one content block."""
+    return {"type": "assistant", "parent_tool_use_id": parent,
+            "message": {"id": mid, "role": "assistant", "content": [block]}}
+
+
+def ev_text(mid: str, text: str, parent: str | None = None) -> dict:
+    return ev_assistant(mid, {"type": "text", "text": text}, parent)
+
+
+def blk_agent(tuid: str, isolation: str | None = None, name: str = "Agent", prompt: str = "work") -> dict:
+    inp = {"description": "member", "prompt": prompt, "subagent_type": "general-purpose"}
+    if isolation:
+        inp["isolation"] = isolation
+    return {"type": "tool_use", "id": tuid, "name": name, "input": inp}
+
+
+def ev_tool_result(tuid: str, text: str = "ok", parent: str | None = None) -> dict:
+    return {"type": "user", "parent_tool_use_id": parent,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tuid, "content": text}]}}
+
+
+def ev_result(denials: list | tuple = ()) -> dict:
+    return {"type": "result", "subtype": "success", "is_error": False,
+            "permission_denials": list(denials)}
+
+
+def build_transcript(*, agents: int = 0, per_message: int = 1, sub_agents: int = 0,
+                     isolation: str | None = None, tool_name: str = "Agent",
+                     texts: tuple[str, ...] = (), final_text: str = "Done.",
+                     denials: tuple = (), model: str = TEST_MODEL, init: bool = True,
+                     assistant: bool = True, result: bool = True) -> str:
+    """Synthetic stream-json transcript (JSONL text).
+
+    agents: orchestrator-level Agent/Task calls (tool_name), `per_message` per
+    assistant message; each is answered by a tool_result.  sub_agents: Agent
+    calls emitted by a subagent (parent_tool_use_id set).  texts: orchestrator
+    text messages before the calls.  assistant=False drops every assistant
+    event (shape error).
+    """
+    ev: list[dict] = []
+    if init:
+        ev.append(ev_init(model))
+    if assistant:
+        for i, t in enumerate(texts):
+            ev.append(ev_text(f"msg_t{i}", t))
+        ids = [f"toolu_{i}" for i in range(agents)]
+        for m, start in enumerate(range(0, agents, max(per_message, 1))):
+            chunk = ids[start:start + max(per_message, 1)]
+            for tuid in chunk:
+                ev.append(ev_assistant(f"msg_a{m}", blk_agent(tuid, isolation, tool_name)))
+            for tuid in chunk:
+                ev.append(ev_tool_result(tuid))
+        for j in range(sub_agents):
+            ev.append(ev_assistant(f"msg_s{j}", blk_agent(f"toolu_sub{j}", None, tool_name), parent="toolu_0"))
+        ev.append(ev_text("msg_final", final_text))
+    if result:
+        ev.append(ev_result(denials))
+    return "".join(json.dumps(e) + "\n" for e in ev)
+
+
+def _git(cwd: Path, *args: str) -> None:
+    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    subprocess.run(["git", "-C", str(cwd), "-c", "user.name=harness",
+                    "-c", "user.email=harness@example.invalid", "-c", "commit.gpgsign=false", *args],
+                   check=True, capture_output=True, env=env)
+
+
+def build_repo(path: Path, *, plan_text: str | None = None, commit_plan: bool = True,
+               skills_layout: bool = False, dirty: bool = False) -> None:
+    """Synthetic scratch repo on `main`: one commit, optionally with the plan at
+    specs/tinyshop-plan.md (committed or left untracked), a skills-repository
+    layout (skills/write-spec-plan/SKILL.md), or an untracked file (dirty)."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q", "-b", "main")
+    (path / "README.md").write_text("synthetic\n", encoding="utf-8")
+    if skills_layout:
+        (path / "skills" / "write-spec-plan").mkdir(parents=True)
+        (path / "skills" / "write-spec-plan" / "SKILL.md").write_text("skill\n", encoding="utf-8")
+    if plan_text is not None:
+        (path / "specs").mkdir()
+        (path / "specs" / "tinyshop-plan.md").write_text(plan_text, encoding="utf-8")
+    _git(path, "add", "-A")
+    if plan_text is not None and not commit_plan:
+        _git(path, "reset", "-q", "--", "specs")
+    _git(path, "commit", "-q", "-m", "Initial")
+    if dirty:
+        (path / "stray.txt").write_text("x\n", encoding="utf-8")
+
+
+# ------------------------------------------------------------ check_run cases
+
+def _run_args(scenario: str, repo: str = "repo", plan: str = "plan.md",
+              transcript: str = "transcript.jsonl", run: int = 1) -> list[str]:
+    return [repo, plan, "--transcript", transcript, "--run", str(run), "--scenario", scenario]
+
+
+def _run_case(scenario: str, transcript: str | None, exit_: int, violations: list[str], *,
+              repo_kw: dict | None = None, extra: dict | None = None,
+              args: list[str] | None = None, no_repo: bool = False,
+              no_plan: bool = False) -> Case:
+    plan = render(base7())
+    files: dict[str, str] = {}
+    if not no_plan:
+        files["plan.md"] = plan
+    if transcript is not None:
+        files["transcript.jsonl"] = transcript
+    kw = dict(repo_kw or {})
+    kw.setdefault("plan_text", plan.replace("@DIR@", "/scratch"))
+    expect = {"checker": CHECK_RUN, "args": args or _run_args(scenario), "exit": exit_,
+              "violations": violations}
+    expect.update(extra or {})
+    return Case(files, expect, None if no_repo else (lambda d, kw=kw: build_repo(d / "repo", **kw)))
+
+
+# refusals (VC-017) and usage errors (VC-016 run half)
+
+def case_run_refuse_skills_repo() -> Case:
+    return _run_case("full", build_transcript(), 2, [], repo_kw={"skills_layout": True},
+                     extra={"output_contains": ["refusing to check the skills repository"]})
+
+
+def case_run_refuse_skills_repo_downgrade() -> Case:
+    return _run_case("downgrade", build_transcript(), 2, [], repo_kw={"skills_layout": True, "plan_text": None})
+
+
+def case_run_refuse_uncommitted_plan() -> Case:
+    return _run_case("full", build_transcript(), 2, [], repo_kw={"commit_plan": False},
+                     extra={"output_contains": ["is not committed on main"]})
+
+
+def case_run_missing_plan_in_repo_ok_for_downgrade() -> Case:
+    return _run_case("downgrade", build_transcript(), 0, [], repo_kw={"plan_text": None})
+
+
+def case_run_usage_missing_transcript() -> Case:
+    return _run_case("downgrade", None, 2, [], extra={"output_contains": ["transcript not found"]})
+
+
+def case_run_usage_unparseable_transcript() -> Case:
+    return _run_case("downgrade", "not json\n", 2, [])
+
+
+def case_run_usage_no_init_event() -> Case:
+    return _run_case("downgrade", build_transcript(init=False), 2, [],
+                     extra={"output_contains": ["no system init event"]})
+
+
+def case_run_usage_no_assistant_events() -> Case:
+    return _run_case("downgrade", build_transcript(assistant=False), 2, [],
+                     extra={"output_contains": ["no assistant events"]})
+
+
+def case_run_usage_nonexistent_repo() -> Case:
+    return _run_case("downgrade", build_transcript(), 2, [], no_repo=True,
+                     extra={"output_contains": ["repository not found"]})
+
+
+def case_run_usage_missing_plan_file() -> Case:
+    return _run_case("downgrade", build_transcript(), 2, [], no_plan=True)
+
+
+def case_run_usage_plan_scenario_rejected() -> Case:
+    return _run_case("downgrade", build_transcript(), 2, [], args=_run_args("plan"))
+
+
+def case_run_usage_no_scenario() -> Case:
+    return _run_case("downgrade", build_transcript(), 2, [],
+                     args=["repo", "plan.md", "--transcript", "transcript.jsonl", "--run", "1"])
+
+
+# cost check (VC-020 / NFR-001): exactly at the limit passes, one over fails
+
+def _nfr(scenario: str, n: int, bad: bool, **kw) -> Case:
+    extra = {"output_contains": [f"subagents: {n}"]}
+    return _run_case(scenario, build_transcript(agents=n, **kw), 1 if bad else 0,
+                     ["NFR-001"] if bad else [], extra=extra)
+
+
+def case_run_nfr001_full_15_ok() -> Case:
+    return _nfr("full", 15, False)
+
+
+def case_run_nfr001_full_16_fails() -> Case:
+    return _nfr("full", 16, True)
+
+
+def case_run_nfr001_downgrade_6_ok() -> Case:
+    return _nfr("downgrade", 6, False)
+
+
+def case_run_nfr001_downgrade_7_fails() -> Case:
+    return _nfr("downgrade", 7, True)
+
+
+def case_run_nfr001_failing_member_6_ok() -> Case:
+    return _nfr("failing-member", 6, False)
+
+
+def case_run_nfr001_failing_member_7_fails() -> Case:
+    return _nfr("failing-member", 7, True)
+
+
+def case_run_nfr001_counts_calls_not_messages() -> Case:
+    return _nfr("full", 16, True, per_message=4)
+
+
+def case_run_nfr001_task_tool_name_counts() -> Case:
+    return _nfr("downgrade", 7, True, tool_name="Task")
+
+
+def case_run_nfr001_subagent_calls_not_counted() -> Case:
+    return _run_case("full", build_transcript(agents=15, sub_agents=5), 0, [],
+                     extra={"output_contains": ["subagents: 15"]})
+
+
+def case_run_nfr001_subagent_calls_not_counted_other() -> Case:
+    return _run_case("failing-member", build_transcript(agents=6, sub_agents=3), 0, [],
+                     extra={"output_contains": ["subagents: 6"]})
+
+
+# result file content (BR-004): model, notes, permission_denials
+
+def case_run_good_result_notes() -> Case:
+    denial = {"tool_name": "Bash", "tool_use_id": "toolu_x"}
+    return _run_case("downgrade", build_transcript(agents=2, denials=(denial,), model="claude-other"), 0, [],
+                     repo_kw={"dirty": True},
+                     extra={"model": "claude-other", "scenario": "downgrade", "run": 1,
+                            "notes_contain": ["subagents: 2", "skill-source check skipped",
+                                              "working tree is dirty",
+                                              'permission_denials: [{"tool_name": "Bash", "tool_use_id": "toolu_x"}]']})
+
+
+def case_run_good_result_run_number() -> Case:
+    return _run_case("failing-member", build_transcript(agents=3), 0, [],
+                     args=_run_args("failing-member", run=3),
+                     extra={"scenario": "failing-member", "run": 3, "model": TEST_MODEL})
+
+
+def case_run_note_no_result_event() -> Case:
+    return _run_case("downgrade", build_transcript(result=False), 0, [],
+                     extra={"notes_contain": ["transcript has no result event"]})
+
+
+# --summary (BR-004)
+
+def _res(scenario: str, k: int, passed: bool, violations: list[str] | None = None) -> dict[str, str]:
+    data = {"scenario": scenario, "run": k, "passed": passed, "violations": violations or [],
+            "notes": [], "model": TEST_MODEL}
+    return {f"results/{scenario}-{k}.json": json.dumps(data)}
+
+
+def _summary_case(scenario: str, files: dict[str, str], exit_: int, violations: list[str],
+                  output: list[str], args: list[str] | None = None) -> Case:
+    return Case(files, {"checker": CHECK_RUN, "args": args or ["--summary", "results", "--scenario", scenario],
+                        "exit": exit_, "violations": violations, "append_result_out": False,
+                        "output_contains": output})
+
+
+def case_summary_true_true_false_exits_0() -> Case:
+    f = {**_res("full", 1, True), **_res("full", 2, True), **_res("full", 3, False, ["VC-009"])}
+    return _summary_case("full", f, 0, [], ["violations: VC-009"])
+
+
+def case_summary_true_false_false_exits_1() -> Case:
+    f = {**_res("downgrade", 1, True), **_res("downgrade", 2, False, ["VC-014", "NFR-001"]),
+         **_res("downgrade", 3, False, ["VC-014", "error"])}
+    return _summary_case("downgrade", f, 1, ["VC-014", "NFR-001", "error"],
+                         ["violations: VC-014 NFR-001 error"])
+
+
+def case_summary_two_files_exits_2() -> Case:
+    f = {**_res("failing-member", 1, True), **_res("failing-member", 2, False, ["VC-015"])}
+    return _summary_case("failing-member", f, 2, [], ["violations: VC-015", "fewer than 3"])
+
+
+def case_summary_all_pass_prints_none() -> Case:
+    f = {**_res("plan", 1, True), **_res("plan", 2, True), **_res("plan", 3, True)}
+    return _summary_case("plan", f, 0, [], ["violations: none"])
+
+
+def case_summary_ignores_other_scenarios() -> Case:
+    f = {**_res("full", 1, False, ["VC-008"]), **_res("full", 2, True), **_res("full", 3, True),
+         **_res("downgrade", 1, False, ["VC-014"]), **_res("plan", 1, False, ["VC-003"])}
+    return _summary_case("full", f, 0, [], ["violations: VC-008", "3 files, 2 passed"])
+
+
+def case_summary_missing_dir_exits_2() -> Case:
+    return _summary_case("full", {}, 2, [], ["results directory not found"],
+                         args=["--summary", "nope", "--scenario", "full"])
+
+
+def case_summary_bad_result_file_exits_2() -> Case:
+    f = {**_res("full", 1, True), **_res("full", 2, True), "results/full-3.json": "[]"}
+    return _summary_case("full", f, 2, [], ["BR-004 shape"])
+
+
+# --mark-failed (D8, D10)
+
+def _mark_case(scenario: str, run: int, violation: str | None, **extra) -> Case:
+    args = ["--mark-failed", "--scenario", scenario, "--run", str(run), "--result-out", "result.json"]
+    if violation:
+        args += ["--violation", violation]
+    expect = {"checker": CHECK_RUN, "args": args, "exit": 0, "passed": False,
+              "violations": [violation or "skipped"], "append_result_out": False,
+              "result_file": "result.json", "scenario": scenario, "run": run, "model": ""}
+    expect.update(extra)
+    return Case({}, expect)
+
+
+def case_mark_failed_full_run_2_skipped() -> Case:
+    return _mark_case("full", 2, None)
+
+
+def case_mark_failed_error_violation() -> Case:
+    return _mark_case("downgrade", 1, "error")
+
+
+def case_mark_failed_plan_scenario() -> Case:
+    return _mark_case("plan", 3, "error")
+
+
+def case_mark_failed_failing_member() -> Case:
+    return _mark_case("failing-member", 2, "skipped")
+
+
+def case_mark_failed_needs_result_out() -> Case:
+    return Case({}, {"checker": CHECK_RUN, "args": ["--mark-failed", "--scenario", "full", "--run", "1"],
+                     "exit": 2, "violations": [], "append_result_out": False})
+
+
+def case_mark_failed_rejects_other_violation() -> Case:
+    return Case({}, {"checker": CHECK_RUN,
+                     "args": ["--mark-failed", "--scenario", "full", "--run", "1", "--result-out", "r.json",
+                              "--violation", "VC-008"],
+                     "exit": 2, "violations": [], "append_result_out": False})
+
+
+def case_mark_failed_rejects_unknown_scenario() -> Case:
+    return Case({}, {"checker": CHECK_RUN,
+                     "args": ["--mark-failed", "--scenario", "smoke", "--run", "1", "--result-out", "r.json"],
+                     "exit": 2, "violations": [], "append_result_out": False})
+
+
 # ------------------------------------------------------------------- framework
 
 def all_cases() -> list[tuple[str, object]]:
@@ -372,6 +736,8 @@ def main(argv: list[str]) -> int:
             p = d / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text.replace("@DIR@", str(d)), encoding="utf-8")
+        if case.build is not None:
+            case.build(d)
         (d / "expect.json").write_text(json.dumps(case.expect, indent=2) + "\n", encoding="utf-8")
     print(f"built {len(cases)} cases in {out}")
     return 0

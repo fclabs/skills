@@ -49,3 +49,21 @@ Ids are the plan's `D-NNN`; spec decisions are cited as `spec D5`.
 **Decision**: Depends mismatch is VC-005. A plan with no Execution Order table or no Iteration headings is VC-003 (exit 1); only a missing, empty or undecodable file is exit 2. Dependencies for VC-004/005/025 come from the table cell, falling back to the field.
 **Rejected**: Exit 2 for a malformed plan (a bad model output would show as an errored run instead of a failed VC).
 **Consequences**: Bad cases must be built so exactly one id fires.
+
+## D-009: check_run.py validates transcript shape strictly; skill-source switch only notes  (Iteration 4)
+**Context**: The spec says a transcript not matching the recorded shape is a usage error (exit 2); the real shape is unknown until Iteration 9. The plan wants a `--check-skill-source` switch wired but off.
+**Decision**: `hlib.load_transcript` raises (exit 2) when the file is missing/unparseable, has no init event, an init event without a model, or no orchestrator-level assistant events. A missing `result` event is only a note. `--check-skill-source` exists; when given it adds the note `skill-source check requested but not implemented`, by default the note `skill-source check skipped`.
+**Rejected**: Requiring a `result` event (a killed run yields a partial transcript; D10 maps crashes via the caller, not the checker); silently ignoring the switch.
+**Consequences**: Iteration 9 replaces the switch's body and the default note, and updates `notes_contain` in cases.
+
+## D-010: Check registry design and refusal order  (Iteration 4)
+**Context**: Iterations 5-6 add ten checks that must share parsing, git access and notes without touching the CLI flow.
+**Decision**: `@check(vc_id, scenarios)` registers `fn(ctx, findings)` in `CHECKS`; `ctx` is `Context(repo, plan, tr, scenario, run)`. NFR-001 is itself a registered check. Refusals run before the transcript is loaded: plan parse, repo is a git dir, skills-repo layout, plan committed on `main` (only for `full`).
+**Rejected**: Tuples returning (violations, notes) lists (more plumbing than a shared Findings); checking the transcript first (a refused repo should not depend on transcript quality).
+**Consequences**: A check adds violations under any id (its own VC or NFR-001); `scenarios` decides when it runs.
+
+## D-011: Summary, mark-failed and expect.json extensions  (Iteration 4)
+**Context**: `--summary` and `--mark-failed` take no `--result-out` (or take their own), and the spec leaves open exit codes of `--mark-failed` and what `--summary` prints when it exits 2.
+**Decision**: `--mark-failed` exits 0 after writing (the caller already decided the run failed); `--violation` accepts only `skipped|error` (argparse exit 2 otherwise); scenarios `plan|full|downgrade|failing-member`. `--summary` prints `summary S: N files, P passed` and `violations: <union|none>` before exiting, even for exit 2; files that do not have the BR-004 shape are exit 2. expect.json gained `append_result_out`, `result_file`, `output_contains`, `passed`, `scenario`, `run`; `Case` gained `build`.
+**Rejected**: Exit 1 for `--mark-failed` (would make run_scenario.sh treat it as a checker failure); a separate runner for non-result modes.
+**Consequences**: run.sh stays one runner for every case; later cases can combine the keys freely.

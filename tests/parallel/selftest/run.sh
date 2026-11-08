@@ -27,12 +27,23 @@ def check(case):
     checker = harness / exp["checker"]
     if not checker.is_file():
         return f"checker {exp['checker']} is missing"
-    res = case / "result.json"
-    cp = subprocess.run([sys.executable, str(checker), *exp["args"], "--result-out", str(res)],
-                        cwd=case, capture_output=True, text=True)
+    res = case / exp.get("result_file", "result.json")
+    cmd = [sys.executable, str(checker), *exp["args"]]
+    if exp.get("append_result_out", True):
+        cmd += ["--result-out", str(res)]
+    cp = subprocess.run(cmd, cwd=case, capture_output=True, text=True)
+    out = cp.stdout + cp.stderr
     if cp.returncode != exp["exit"]:
-        return f"exit {cp.returncode}, expected {exp['exit']}: {(cp.stdout + cp.stderr).strip()[-300:]}"
+        return f"exit {cp.returncode}, expected {exp['exit']}: {out.strip()[-300:]}"
+    for s in exp.get("output_contains", []):
+        if s not in out:
+            return f"output does not contain {s!r}: {out.strip()[-300:]}"
     if exp["exit"] == 2:
+        return None
+    if not (exp.get("append_result_out", True) or "result_file" in exp):
+        for v in exp["violations"]:      # modes without a result file: ids must be printed
+            if v not in cp.stdout:
+                return f"stdout does not name {v}"
         return None
     if not res.is_file():
         return "no result file written"
@@ -43,13 +54,17 @@ def check(case):
         return "violations/notes must be lists of str"
     if set(data["violations"]) != set(exp["violations"]) or len(data["violations"]) != len(set(data["violations"])):
         return f"violations {data['violations']}, expected {exp['violations']}"
-    if data["passed"] != (exp["exit"] == 0):
-        return "passed flag disagrees with exit code"
-    for v in exp["violations"]:
-        if v not in cp.stdout:
-            return f"stdout does not name {v}"
+    if data["passed"] != exp.get("passed", exp["exit"] == 0):
+        return "passed flag disagrees with expectation"
+    if exp.get("append_result_out", True):
+        for v in exp["violations"]:
+            if v not in cp.stdout:
+                return f"stdout does not name {v}"
     if "model" in exp and data["model"] != exp["model"]:
         return f"model {data['model']!r}, expected {exp['model']!r}"
+    for k in ("scenario", "run"):
+        if k in exp and data[k] != exp[k]:
+            return f"{k} {data[k]!r}, expected {exp[k]!r}"
     for s in exp.get("notes_contain", []):
         if s not in data["notes"]:
             return f"note {s!r} missing from {data['notes']}"
