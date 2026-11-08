@@ -19,6 +19,12 @@ You act as the **orchestrator**: you read the plan, dispatch **one subagent per
 iteration**, and gate progress on that subagent's reported result. You do not
 implement iteration scope yourself.
 
+Iterations run sequentially unless the plan's **Execution Order** table puts
+them in the same **parallel group**. Members of a group run concurrently, each
+in its own git worktree, and are merged and reconciled before anything later
+starts (see 3e). Everything else in this skill applies to a group member as it
+does to a solo iteration unless 3e says otherwise.
+
 The full regression suite runs **once at the end**, not after each iteration. By default the loop auto-advances on green criteria; if the user says "step me through this" / "interactive", pause for confirmation after each iteration.
 
 ## 1. Read the plan
@@ -41,8 +47,23 @@ iteration).
 
 ## 3. Execute each iteration in order — one subagent per iteration
 
-Iterations run **sequentially**, never in parallel: each one builds on the
-committed state of the previous. For every iteration:
+Build the schedule from the plan's `## Execution Order` table (and each
+iteration's `Depends on`, `Parallel group`, `Touches`): a list of **steps**,
+where a step is either a single iteration or a whole parallel group. Steps run
+**sequentially**; each builds on the committed state of the previous step. A
+plan with no Execution Order table (an older plan) is fully sequential.
+
+**Validate every group before running it.** Do not trust the plan blindly:
+treat the group as sequential if any of these hold — members are not adjacent
+or have different `Depends on`; one member depends on another; `Touches`
+overlap between members (compare the paths yourself); a member touches a shared
+resource (lockfile, dependency manifest, migration, schema, registry/barrel
+file, shared config, generated code, fixtures, CI config, docs space); the
+group contains Iteration 1 or the final documentation iteration; or a member
+lacks `Touches`. Tell the user which group you downgraded and why. A solo
+iteration follows 3a–3d; a group follows 3e (which reuses them per member).
+
+For every iteration:
 
 ### 3a. Announce
 
@@ -85,8 +106,9 @@ containing:
   plan, the paths of the artifacts it wrote, and any notes the next iteration
   needs.
 
-Wait for the subagent to finish before doing anything else. Never run a second
-iteration's subagent while one is still in flight.
+Wait for the subagent to finish before doing anything else. Outside a validated
+parallel group (3e), never run a second iteration's subagent while one is still
+in flight.
 
 ### 3c. Gate on the subagent's report
 
@@ -120,6 +142,70 @@ not shown to them. Then:
   ```
   and wait for confirmation.
 
+### 3e. Parallel groups
+
+For a validated group of iterations `N…M`:
+
+**Announce** the group: members, goals, and "running concurrently".
+
+**Dispatch** all members **in a single message** (multiple Agent calls), each
+with `isolation: "worktree"` so each has its own checkout branched from the
+current HEAD (the committed state before the group). Each prompt is built as in
+3b, with these changes:
+
+- **Reduced artifact protocol.** The member reads the artifacts as usual but
+  must **not** edit `CONTEXT.md` or `DECISIONS.md`. It writes only its own
+  `iterations/NN-<slug>.md`, with two extra sections: **Proposed CONTEXT.md
+  changes** (exact file-map entries, interfaces, conventions, commands, known
+  gaps to add or change) and **Proposed decisions** (full `D-NNN`-format
+  entries with the number left as `D-?`).
+- **Stay inside `Touches`.** The member must not create or modify any path
+  outside its declared `Touches`. If it needs to, it stops and reports without
+  committing — that means the plan's disjointness claim was wrong.
+- **Commit only its own paths**, staged explicitly by path (never `git add -A`),
+  as a single commit in its worktree branch.
+- Tell it the other members exist and what they own, so it does not touch their
+  area or wait on them. Members never communicate or depend on each other.
+- Same report format as 3b, plus the worktree branch name.
+
+**Gate the group.** Collect all reports and apply 3c to each member. The group
+passes only if **every** member is all-PASS and committed with its record
+written. If any member fails or blocks:
+
+- Do not merge anything yet. Fix the failing member via `SendMessage` as in 3c
+  (or surface the blocker to the user); the passing members' worktrees stay
+  untouched meanwhile.
+- If the failure shows the members actually interfere (shared file, hidden
+  dependency), discard the group's worktrees and re-run its members
+  **sequentially** in iteration order, telling the user the plan's parallel
+  marking was wrong.
+
+**Merge.** When all members pass, merge their branches into the main branch one
+at a time in iteration order (`git merge --no-ff`, message
+`Merge iteration N: <name>`). Because `Touches` are disjoint this should be
+clean. Check `git diff --name-only` of each member's commit against its
+declared `Touches` first; a path outside it, or any merge conflict, means the
+disjointness claim failed — abort the merge, and fall back to running the group
+sequentially as above. Do not hand-resolve conflicts.
+
+**Reconcile.** After the last merge, do this yourself (the one place the
+orchestrator edits artifacts; it is bookkeeping, not iteration code):
+
+1. Rewrite `CONTEXT.md` by applying every member's **Proposed CONTEXT.md
+   changes** to the pre-group version; resolve overlaps in favour of the lower
+   iteration number and keep the file under ~300 lines.
+2. Append each **Proposed decision** to `DECISIONS.md`, assigning the next
+   `D-NNN` numbers in iteration order, and replace the `D-?` placeholders.
+3. Verify the merged tree builds and every member's own tests still pass
+   together (run each member's test criteria commands once on the merged
+   result). A failure here is a hidden interaction: surface it; do not advance.
+4. Commit as `Reconcile artifacts for iterations N–M`.
+
+Only then advance to the next step. Remove the worktrees when done.
+
+**Interactive mode**: confirm once per group, before dispatching it and again
+after reconciliation, not per member.
+
 ## 4. Final verification
 
 After all iterations are complete, do this work yourself as the orchestrator —
@@ -137,12 +223,12 @@ Do not declare the implementation complete until `/verify-spec` reports `PASSED`
 ## Rules (enforce throughout)
 
 1. **One subagent per iteration** — every iteration's implementation runs in its own subagent; the orchestrator plans, dispatches, gates, and reports, and does not write iteration code itself.
-2. **Sequential dispatch** — never run two iteration subagents concurrently; each starts from the previous iteration's commit.
-3. **Gate** — never start iteration N+1 until iteration N's success criteria pass and are committed.
+2. **Sequential dispatch, except validated groups** — never run two iteration subagents concurrently unless they are members of a parallel group that passed validation in §3 (independent, disjoint `Touches`, no shared resource, adjacent). Group members run in separate worktrees; anything unproven runs sequentially. Each step starts from the previous step's commit.
+3. **Gate** — never start the next step until every iteration in the current step has passed its success criteria and is committed — and, for a group, merged and reconciled.
 4. **No scope creep** — implement exactly what the iteration scope says; refactors and "while I'm here" changes belong in a separate commit or a later iteration.
 5. **Working state at every commit** — the codebase must build and the iteration's own tests must pass after each iteration commit. The full regression runs once at the end.
 6. **Context carries forward through artifacts** — each subagent starts fresh and learns the project state from `CONTEXT.md`, `DECISIONS.md`, and the iteration records, not from the orchestrator's memory. Anything a later iteration needs must be written to disk by the iteration that learned it.
-7. **Artifacts every iteration** — an iteration is not complete until its record is written and `CONTEXT.md` matches the committed code, no matter how green its code criteria are.
+7. **Artifacts every iteration** — an iteration is not complete until its record is written and `CONTEXT.md` matches the committed code, no matter how green its code criteria are. For a group member the record carries proposals, and `CONTEXT.md`/`DECISIONS.md` are updated by the reconciliation commit; the group is not complete until that commit lands with no `D-?` placeholders left.
 8. **User-facing docs ship in the final iteration** — never partway through. The final subagent reads the whole artifact directory and rewrites it as documentation for a person who was not here: organised by reader need, not iteration order, with the criteria tables, PASS/FAIL records, commit SHAs, and hand-off notes dropped and the decisions and constraints kept. Working artifacts are separate, update every iteration, and are never shipped as the documentation.
 9. **No orphaned state** — if an iteration is interrupted, the codebase must still build; no half-wired features called by existing code.
 10. **Ambiguity blocks progress** — if a scope item is unclear, the subagent stops and reports; the orchestrator asks the user rather than silently picking an interpretation.
