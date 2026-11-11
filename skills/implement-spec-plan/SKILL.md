@@ -204,14 +204,16 @@ messages. Each prompt is built as in 3b, with these changes:
   **Messages**, and an answer that settles a decision also as a proposed
   decision.
 - **Stay inside `Touches`.** The member must not create or modify any path
-  outside its declared `Touches`. If it needs to, it stops and reports without
+  outside its declared `Touches`, other than its own
+  `iterations/NN-<slug>.md`. If it needs to, it stops and reports without
   committing — that means the plan's disjointness claim was wrong.
 - **Commit only its own paths**, staged explicitly by path (never `git add -A`),
   as a single commit in its worktree branch.
 - Tell it the other members exist and what they own, so it does not touch their
   area or wait on them. Members never message or depend on each other; only
   you exchange messages with them.
-- Same report format as 3b, plus the worktree branch name.
+- Same report format as 3b, plus the worktree branch name and every question
+  still unanswered.
 
 **Gate the group.** Collect all reports and apply 3c to each member. The group
 passes only if **every** member is all-PASS and committed with its record
@@ -230,7 +232,8 @@ fails or blocks:
 at a time in iteration order (`git merge --no-ff`, message
 `Merge iteration N: <name>`). Because `Touches` are disjoint this should be
 clean. Check `git diff --name-only` of each member's commit against its
-declared `Touches` first; a path outside it, or any merge conflict, means the
+declared `Touches` first, leaving out its own `iterations/NN-<slug>.md`; a
+path outside it, or any merge conflict, means the
 disjointness claim failed for that member: do not merge it (`git merge --abort`
 on a conflict) and use the fallback. Do not hand-resolve conflicts.
 

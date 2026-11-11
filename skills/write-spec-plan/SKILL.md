@@ -234,7 +234,7 @@ this must not intersect any other member's Touches.
 
 **Scope**:
 - Bullet list of what will be implemented (including any docs that are real deliverables for this iteration)
-- Artifacts: update `CONTEXT.md` (name the sections this iteration changes), append `DECISIONS.md` if a choice was made, write `iterations/NN-<slug>.md`. *(Parallel-group member instead: write only `iterations/NN-<slug>.md` including Proposed CONTEXT.md changes and Proposed decisions; do not edit `CONTEXT.md` or `DECISIONS.md`.)*
+- Artifacts: update `CONTEXT.md` (name the sections this iteration changes), append `DECISIONS.md` if a choice was made, write `iterations/NN-<slug>.md`. *(Parallel-group member instead: write only `iterations/NN-<slug>.md` including Proposed CONTEXT.md changes, Proposed decisions and Messages; do not edit `CONTEXT.md` or `DECISIONS.md`.)*
 
 **Success criteria**:
 - Concrete, verifiable conditions that must ALL be true before this iteration is complete
@@ -407,3 +407,7 @@ allows, and what each reading changes. Ask the user to settle each one (with
 place of the flag. If you flagged none, say so. A plan with an unsettled flag
 is not ready to run: in a parallel group, several subagents would hit the same
 question at once.
+
+If the user asked you to work non-interactively, do not ask: keep each flag in
+its iteration and list the flags in your final report, so the user settles them
+before the plan runs.
