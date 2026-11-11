@@ -214,14 +214,35 @@ something goes sideways, they're the first place to look.
 
 ### The iterations
 
-Each iteration in the plan has a **Goal**, a **Reads** list, a **Scope**,
-**Success criteria** (each referencing the `VC-NNN` it satisfies, with the exact
-command to run), a **Hands off** section naming the facts the next iteration
-needs, and a **commit message**.
+Each iteration in the plan has a **Goal**, its **Depends on**, **Parallel group**
+and **Touches** (the iterations it needs, the group it runs with, if any, and the
+paths it creates or modifies), a **Reads** list, a **Scope**, **Success criteria**
+(each referencing the `VC-NNN` it satisfies, with the exact command to run), a
+**Hands off** section naming the facts the next iteration needs, and a **commit
+message**.
 
 Iterations are ordered so each one leaves something working and testable. Each
 one ends in a single commit including its artifacts. An iteration may not start
 until the previous one's criteria have actually passed.
+
+### Parallel groups
+
+An **Execution Order** table lists every iteration with its dependencies and
+parallel group. Plans default to sequential: two iterations share a group only
+when neither depends on the other, their Touches are disjoint, and neither touches
+a shared resource (a lockfile, a migration, a router or `__init__`, a test port).
+The first and the final iteration, and any iteration that changes dependencies,
+adds a migration or refactors code another iteration touches, always run alone.
+
+Two checks run before the plan is final:
+
+- **Against the code.** For each iteration, the skill traces every path the change
+  must reach (registration points, manifests, fixtures, snapshots, files a hook
+  rewrites) and every dependency on another iteration, fixes Touches and Depends
+  on, and splits any group whose members would collide. A **Group verification**
+  table records what changed.
+- **Ambiguities.** The skill lists the ambiguities it flagged and asks you to
+  settle each one, then writes your answers into the plan.
 
 ### The final iteration writes the docs
 
@@ -257,12 +278,30 @@ It acts as an **orchestrator**, not an implementer. For each iteration, in order
 1. Announces the iteration.
 2. Dispatches **one subagent** with a self-contained prompt: the absolute paths,
    the iteration's goal/scope/criteria quoted verbatim, and the rules.
-3. Waits. Never runs two iterations in parallel.
+3. Waits. Outside a parallel group, never runs two iterations at once.
 4. **Gates** on the result: every success criterion must have actually been run
    and passed, the work must be committed, and the artifacts must be present and
    current. Stale artifacts count as a failure even when the code is green —
    because the next subagent has no other way to learn what happened.
 5. Advances.
+
+For a **parallel group**, it:
+
+1. Re-validates the group and runs it sequentially if the plan's claim does not
+   hold.
+2. Asks you how many members to run at once (all, fewer, or one at a time),
+   naming the model, since parallel subagents spend usage all at once.
+3. Dispatches one subagent per member, each in its own git worktree. A member
+   sets up its own environment there, changes only its Touches, and writes only
+   its own iteration record, with the `CONTEXT.md` changes and decisions it
+   proposes. It asks about an ambiguity with a `QUESTION` message instead of
+   stopping; an answer that affects the whole group goes to every running member.
+4. Merges the members in iteration order (`git merge --no-ff`), then reconciles
+   `CONTEXT.md` and `DECISIONS.md` in one commit and re-runs every member's
+   criteria on the merged tree.
+5. If a member conflicts, strays outside its Touches or turns out to interfere,
+   keeps the members before it and runs it and the rest of the group
+   sequentially.
 
 ### Your part
 
