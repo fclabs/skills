@@ -41,7 +41,7 @@ the skill directory itself, not the `skills/` wrapper.
 
 | Skill | Description |
 |---|---|
-| [ask-your-coworker-for-feedback](skills/ask-your-coworker-for-feedback/SKILL.md) | Asks the other agents installed locally (Claude Code, Codex, Cursor Agent, Gemini CLI) for read-only, evidence-backed feedback on an output — one subagent per coworker — then has a separate arbiter agent verify each point and say which are correct or do not apply. Includes detect/ask helper script. |
+| [ask-your-coworker-for-feedback](skills/ask-your-coworker-for-feedback/SKILL.md) | Asks the other agents installed locally (Claude Code, Codex, Cursor Agent) for read-only, evidence-backed feedback on an output — one subagent per coworker — then has a separate arbiter agent verify each point and say which are correct or do not apply. Includes detect/ask helper script. |
 
 ### Domain Modeling
 

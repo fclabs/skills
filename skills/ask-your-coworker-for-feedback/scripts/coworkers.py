@@ -41,12 +41,6 @@ COWORKERS = {
         "host_env": ["CURSOR_AGENT", "CURSOR_TRACE_ID"],
         "model_flag": "--model",
     },
-    "gemini": {
-        "binary": "gemini",
-        "vendor": "Google Gemini CLI",
-        "host_env": ["GEMINI_CLI"],
-        "model_flag": "-m",
-    },
 }
 
 
@@ -87,9 +81,6 @@ def build_command(name: str, binary: str, prompt: str, out_file: Path, model: st
         argv = [binary, "-p", "--mode", "ask", "--trust", "--output-format", "text",
                 *model_args, prompt]
         return argv, None
-    if name == "gemini":
-        argv = [binary, "--approval-mode", "plan", "-o", "text", *model_args, "-p", ""]
-        return argv, prompt
     raise KeyError(name)
 
 

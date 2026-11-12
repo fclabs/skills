@@ -3,7 +3,7 @@ name: ask-your-coworker-for-feedback
 description: >-
   Gets independent, actionable feedback on an output you produced (code diff,
   spec, plan, design, doc, analysis) by asking other coding agents installed on
-  the machine — Claude Code, Codex, Cursor Agent, Gemini CLI — one subagent per
+  the machine — Claude Code, Codex, Cursor Agent — one subagent per
   coworker, then has a separate reviewer agent triage the feedback and say which
   points are correct and which do not apply. Use when the user asks for a second
   opinion, a peer review from other agents/models, "ask codex/cursor/claude what
@@ -81,7 +81,7 @@ Spawn all coworker subagents in a single message. Each subagent's whole job:
 >
 > If the command exits non-zero, return the error text verbatim and which exit code (2 unavailable, 3 agent failed/auth, 4 timeout). Do not retry more than once, and do not fall back to answering the review yourself.
 
-The script runs each CLI headless and read-only (Claude `-p --permission-mode plan`, Codex `exec -s read-only`, Cursor `-p --mode ask`, Gemini `--approval-mode plan`). `--dry-run` shows the exact command. Use `--model` only if the user asks for a specific model.
+The script runs each CLI headless and read-only (Claude `-p --permission-mode plan`, Codex `exec -s read-only`, Cursor `-p --mode ask`). `--dry-run` shows the exact command. Use `--model` only if the user asks for a specific model.
 
 A coworker that fails is reported to the user and skipped; continue with the rest. If fewer than one succeeds, stop and say so.
 
