@@ -40,6 +40,12 @@ Artifact Protocol (an older plan), create the directory next to the plan file as
 (append-only decision log), `iterations/NN-<slug>.md` (one handoff record per
 iteration).
 
+Check whether git ignores the artifact directory (`git check-ignore -q <dir>`).
+If it does, no commit carries the artifacts and nobody runs `git add -f`:
+subagents commit code only, the reconciliation in 3e edits the files without
+committing them, and the artifact checks at each gate look at the files
+instead of the commit.
+
 ## 2. Determine starting iteration
 
 - If the user specifies an iteration number, start there.
@@ -98,7 +104,8 @@ containing:
   codebase as it now stands, append any new decision to `DECISIONS.md`, and
   write `iterations/NN-<slug>.md` with the criteria results, commit-ready file
   list, deviations, gotchas, and a "For the next iteration" section. Artifacts
-  go in the same commit as the code.
+  go in the same commit as the code, unless git ignores the artifact directory
+  (§1).
 - An instruction to stop and report back **without committing** if a scope item
   is ambiguous or a criterion cannot be made to pass.
 - The required report format: per-criterion PASS/FAIL with the command run and
@@ -148,45 +155,95 @@ For a validated group of iterations `N…M`:
 
 **Announce** the group: members, goals, and "running concurrently".
 
-**Dispatch** all members **in a single message** (multiple Agent calls), each
-with `isolation: "worktree"` so each has its own checkout branched from the
-current HEAD (the committed state before the group). Each prompt is built as in
-3b, with these changes:
+**Ask how many run at once.** Parallel subagents spend usage all at once, so
+before dispatching a group ask the user how many members to run at the same
+time (with `AskUserQuestion` when available), naming the members, how many
+subagents that is, and the model they run on: all at once, fewer at a time
+(the user says how many), or one at a time. Skip the question when the user
+already said how many, or asked you to work non-interactively; then run all at
+once.
+
+**Dispatch** the members, as many at once as the user chose, **in a single
+message** (multiple Agent calls), each with `isolation: "worktree"` so each has
+its own checkout branched from the current HEAD (the committed state before the
+group). With fewer at a time, dispatch the next member when one reports; the
+gate, merge and reconciliation stay the same. Keep each member's agent id for
+messages. Each prompt is built as in 3b, with these changes:
 
 - **Reduced artifact protocol.** The member reads the artifacts as usual but
   must **not** edit `CONTEXT.md` or `DECISIONS.md`. It writes only its own
-  `iterations/NN-<slug>.md`, with two extra sections: **Proposed CONTEXT.md
+  `iterations/NN-<slug>.md`, with three extra sections: **Proposed CONTEXT.md
   changes** (exact file-map entries, interfaces, conventions, commands, known
-  gaps to add or change) and **Proposed decisions** (full `D-NNN`-format
-  entries with the number left as `D-?`).
+  gaps to add or change), **Proposed decisions** (full `D-NNN`-format entries
+  with the number left as `D-?`), and **Messages** (every question it sent and
+  every answer it received).
+- **Artifacts inside its worktree.** The plan names the artifact directory by
+  its absolute path in the main checkout. The member reads and writes it at the
+  same repo-relative path inside its own worktree, which holds the artifacts as
+  committed before the group, and commits its record with its code. If git
+  ignores the artifact directory (§1), the worktree has no copy: the member
+  reads the artifacts and writes its record at the absolute path, and commits
+  code only.
+- **Set up the environment.** A new worktree holds tracked files only: no
+  virtualenv, `node_modules`, or untracked config such as `.env`. The member
+  sets them up inside its worktree with the install commands in `CONTEXT.md`
+  before running any criterion, unless a `WorktreeCreate` hook or a
+  `.worktreeinclude` file already did. It never uses the main checkout's
+  environment: an editable install there imports the main checkout's code, not
+  the worktree's.
+- **Questions instead of stopping.** If a scope item is ambiguous, the member
+  sends you a message (`SendMessage` to `main`) whose first line is
+  `QUESTION iter-NN: <question>`, and keeps working on what does not depend on
+  the answer; if nothing is left, it ends its turn without committing. Answer
+  it yourself only when the spec, the plan or `DECISIONS.md` states the answer,
+  and cite it; anything that takes interpretation goes to the user (rule 10).
+  Reply with `SendMessage` to that member's id. When the answer also affects
+  other members, send it to every member still running, with the first line
+  `GROUP <letter>: <answer>`, and put it in the prompt of members not
+  dispatched yet. The member records every question and answer under
+  **Messages**, and an answer that settles a decision also as a proposed
+  decision.
 - **Stay inside `Touches`.** The member must not create or modify any path
-  outside its declared `Touches`. If it needs to, it stops and reports without
+  outside its declared `Touches`, other than its own
+  `iterations/NN-<slug>.md`. If it needs to, it stops and reports without
   committing — that means the plan's disjointness claim was wrong.
 - **Commit only its own paths**, staged explicitly by path (never `git add -A`),
   as a single commit in its worktree branch.
 - Tell it the other members exist and what they own, so it does not touch their
-  area or wait on them. Members never communicate or depend on each other.
-- Same report format as 3b, plus the worktree branch name.
+  area or wait on them. Members never message or depend on each other; only
+  you exchange messages with them.
+- Same report format as 3b, plus the worktree branch name and every question
+  still unanswered.
 
 **Gate the group.** Collect all reports and apply 3c to each member. The group
 passes only if **every** member is all-PASS and committed with its record
-written. If any member fails or blocks:
+written. The relay to the user lists every question a member asked and its
+answer, from the user or from you with the source you cited. If any member
+fails or blocks:
 
 - Do not merge anything yet. Fix the failing member via `SendMessage` as in 3c
   (or surface the blocker to the user); the passing members' worktrees stay
   untouched meanwhile.
 - If the failure shows the members actually interfere (shared file, hidden
-  dependency), discard the group's worktrees and re-run its members
-  **sequentially** in iteration order, telling the user the plan's parallel
-  marking was wrong.
+  dependency), use the fallback below from the first interfering member,
+  telling the user the plan's parallel marking was wrong.
 
 **Merge.** When all members pass, merge their branches into the main branch one
 at a time in iteration order (`git merge --no-ff`, message
 `Merge iteration N: <name>`). Because `Touches` are disjoint this should be
 clean. Check `git diff --name-only` of each member's commit against its
-declared `Touches` first; a path outside it, or any merge conflict, means the
-disjointness claim failed — abort the merge, and fall back to running the group
-sequentially as above. Do not hand-resolve conflicts.
+declared `Touches` first, leaving out its own `iterations/NN-<slug>.md`; a
+path outside it, or any merge conflict, means the
+disjointness claim failed for that member: do not merge it (`git merge --abort`
+on a conflict) and use the fallback. Do not hand-resolve conflicts.
+
+**Fallback.** Keep the members before the failing one, in iteration order:
+merge them if they are not merged yet, and reconcile them as below (step 3
+re-runs their criteria on the merged tree). Then run the failing member and
+every later member of the group as solo iterations (3a–3d, full artifact
+protocol), in iteration order, from the reconciled state, and discard their
+group worktrees. The iterations keep the order a sequential run would give
+them, and only the members from the failing one on are redone.
 
 **Reconcile.** After the last merge, do this yourself (the one place the
 orchestrator edits artifacts; it is bookkeeping, not iteration code):
@@ -195,11 +252,14 @@ orchestrator edits artifacts; it is bookkeeping, not iteration code):
    changes** to the pre-group version; resolve overlaps in favour of the lower
    iteration number and keep the file under ~300 lines.
 2. Append each **Proposed decision** to `DECISIONS.md`, assigning the next
-   `D-NNN` numbers in iteration order, and replace the `D-?` placeholders.
+   `D-NNN` numbers in iteration order, and replace the `D-?` placeholders. A
+   `GROUP` answer that settled a decision gets one entry, even if several
+   records propose it.
 3. Verify the merged tree builds and every member's own tests still pass
    together (run each member's test criteria commands once on the merged
    result). A failure here is a hidden interaction: surface it; do not advance.
-4. Commit as `Reconcile artifacts for iterations N–M`.
+4. Commit as `Reconcile artifacts for iterations N–M`, unless git ignores the
+   artifact directory (§1).
 
 Only then advance to the next step. Remove the worktrees when done.
 
@@ -231,4 +291,4 @@ Do not declare the implementation complete until `/verify-spec` reports `PASSED`
 7. **Artifacts every iteration** — an iteration is not complete until its record is written and `CONTEXT.md` matches the committed code, no matter how green its code criteria are. For a group member the record carries proposals, and `CONTEXT.md`/`DECISIONS.md` are updated by the reconciliation commit; the group is not complete until that commit lands with no `D-?` placeholders left.
 8. **User-facing docs ship in the final iteration** — never partway through. The final subagent reads the whole artifact directory and rewrites it as documentation for a person who was not here: organised by reader need, not iteration order, with the criteria tables, PASS/FAIL records, commit SHAs, and hand-off notes dropped and the decisions and constraints kept. Working artifacts are separate, update every iteration, and are never shipped as the documentation.
 9. **No orphaned state** — if an iteration is interrupted, the codebase must still build; no half-wired features called by existing code.
-10. **Ambiguity blocks progress** — if a scope item is unclear, the subagent stops and reports; the orchestrator asks the user rather than silently picking an interpretation.
+10. **Ambiguity blocks progress** — if a scope item is unclear, a solo iteration's subagent stops and reports, and a group member asks by message (3e); the orchestrator answers only when the spec, the plan or `DECISIONS.md` states the answer, citing it, and otherwise asks the user rather than silently picking an interpretation.
